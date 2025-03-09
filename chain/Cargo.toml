@@ -1,0 +1,46 @@
+[package]
+name = "alto-chain"
+version = "0.0.2"
+publish = true
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "A minimal blockchain built with the Commonware Library."
+readme = "README.md"
+homepage = "https://alto.commonware.xyz"
+repository = "https://github.com/commonwarexyz/alto/tree/main/chain"
+documentation = "https://docs.rs/alto-chain"
+
+[dependencies]
+alto-types = { workspace = true }
+commonware-consensus = { workspace = true }
+commonware-cryptography = { workspace = true }
+commonware-deployer = { workspace = true }
+commonware-macros = { workspace = true }
+commonware-p2p = { workspace = true }
+commonware-resolver = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-storage = { workspace = true }
+commonware-stream = { workspace = true }
+commonware-utils = { workspace = true }
+bytes =  { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt", "json"] }
+governor = { workspace = true }
+prometheus-client = { workspace = true }
+sysinfo = "0.33.1"
+clap = "4.5.18"
+axum = "0.8.1"
+uuid = "1.15.1"
+serde = { version = "1.0.218", features = ["derive"] }
+serde_yaml = "0.9.34"
+
+[[bin]]
+name = "validator"
+path = "src/bin/validator.rs"
+
+[[bin]]
+name = "setup"
+path = "src/bin/setup.rs"
