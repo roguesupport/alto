@@ -1,0 +1,24 @@
+name: Publish
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  All:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Get Rust version
+      id: rust-version
+      run: echo "rust_version=$(rustc --version)" >> "$GITHUB_OUTPUT"
+    - name: Run setup
+      uses: ./.github/actions/setup
+      with:
+        rust-version: ${{ steps.rust-version.outputs.rust_version}}
+    - name: Publish types
+      run: cargo publish --manifest-path types/Cargo.toml
+      continue-on-error: true
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
