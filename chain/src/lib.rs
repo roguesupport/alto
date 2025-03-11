@@ -1,7 +1,62 @@
+use std::future::Future;
+
+use bytes::Bytes;
+use commonware_cryptography::bls12381;
 use serde::{Deserialize, Serialize};
 
 pub mod actors;
 pub mod engine;
+
+/// Trait for interacting with an indexer.
+pub trait Indexer: Clone + Send + Sync + 'static {
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Create a new indexer with the given URI and public key.
+    fn new(uri: &str, public: bls12381::PublicKey) -> Self;
+
+    /// Upload a seed to the indexer.
+    fn seed_upload(&self, seed: Bytes) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Upload a notarization to the indexer.
+    fn notarization_upload(
+        &self,
+        notarized: Bytes,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Upload a finalization to the indexer.
+    fn finalization_upload(
+        &self,
+        finalized: Bytes,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+}
+
+impl Indexer for alto_client::Client {
+    type Error = alto_client::Error;
+    fn new(uri: &str, public: bls12381::PublicKey) -> Self {
+        Self::new(uri, public)
+    }
+
+    fn seed_upload(
+        &self,
+        seed: bytes::Bytes,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        self.seed_upload(seed)
+    }
+
+    fn notarization_upload(
+        &self,
+        notarization: bytes::Bytes,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        self.notarization_upload(notarization)
+    }
+
+    fn finalization_upload(
+        &self,
+        finalization: bytes::Bytes,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        self.finalization_upload(finalization)
+    }
+}
 
 #[derive(Deserialize, Serialize)]
 pub struct Config {
@@ -18,11 +73,15 @@ pub struct Config {
 
     pub message_backlog: usize,
     pub mailbox_size: usize,
+
+    pub indexer: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alto_types::{Finalized, Notarized, Seed};
+    use bls12381::primitives::poly;
     use commonware_cryptography::{bls12381::dkg::ops, ed25519::PublicKey, Ed25519, Scheme};
     use commonware_macros::test_traced;
     use commonware_p2p::simulated::{self, Link, Network, Oracle, Receiver, Sender};
@@ -31,16 +90,60 @@ mod tests {
         Clock, Metrics, Runner, Spawner,
     };
     use commonware_utils::quorum;
-    use engine::Engine;
+    use engine::{Config, Engine};
     use governor::Quota;
     use rand::{rngs::StdRng, Rng, SeedableRng};
-    use std::time::Duration;
     use std::{
         collections::{HashMap, HashSet},
         num::NonZeroU32,
         sync::{Arc, Mutex},
     };
+    use std::{sync::atomic::AtomicBool, time::Duration};
     use tracing::info;
+
+    /// MockIndexer is a simple indexer implementation for testing.
+    #[derive(Clone)]
+    struct MockIndexer {
+        public: bls12381::PublicKey,
+
+        seed_seen: Arc<AtomicBool>,
+        notarization_seen: Arc<AtomicBool>,
+        finalization_seen: Arc<AtomicBool>,
+    }
+
+    impl Indexer for MockIndexer {
+        type Error = std::io::Error;
+
+        fn new(_: &str, public: bls12381::PublicKey) -> Self {
+            MockIndexer {
+                public,
+                seed_seen: Arc::new(AtomicBool::new(false)),
+                notarization_seen: Arc::new(AtomicBool::new(false)),
+                finalization_seen: Arc::new(AtomicBool::new(false)),
+            }
+        }
+
+        async fn seed_upload(&self, seed: Bytes) -> Result<(), Self::Error> {
+            Seed::deserialize(Some(&self.public), &seed).unwrap();
+            self.seed_seen
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn notarization_upload(&self, notarized: Bytes) -> Result<(), Self::Error> {
+            Notarized::deserialize(Some(&self.public), &notarized).unwrap();
+            self.notarization_seen
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn finalization_upload(&self, finalized: Bytes) -> Result<(), Self::Error> {
+            Finalized::deserialize(Some(&self.public), &finalized).unwrap();
+            self.finalization_seen
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+    }
 
     /// Registers all validators using the oracle.
     async fn register_validators(
@@ -163,7 +266,7 @@ mod tests {
 
                 // Configure engine
                 let uid = format!("validator-{}", public_key);
-                let config = engine::Config {
+                let config: Config<MockIndexer> = engine::Config {
                     partition_prefix: uid.clone(),
                     signer: scheme,
                     identity: public.clone(),
@@ -180,6 +283,7 @@ mod tests {
                     max_fetch_size: 1024 * 512,
                     fetch_concurrent: 10,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
+                    indexer: None,
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -196,7 +300,7 @@ mod tests {
                 let metrics = context.encode();
 
                 // Iterate over all lines
-                let mut failed = false;
+                let mut success = false;
                 for line in metrics.lines() {
                     // Ensure it is a metrics line
                     if !line.starts_with("validator-") {
@@ -214,16 +318,16 @@ mod tests {
                         assert_eq!(value, 0);
                     }
 
-                    // If ends with indexed_height, ensure it is at least required_container
-                    if metric.ends_with("_syncer_indexed_height") {
+                    // If ends with contiguous_height, ensure it is at least required_container
+                    if metric.ends_with("_syncer_contiguous_height") {
                         let value = value.parse::<u64>().unwrap();
-                        if value < required_container {
-                            failed = true;
+                        if value >= required_container {
+                            success = true;
                             break;
                         }
                     }
                 }
-                if !failed {
+                if !success {
                     break;
                 }
 
@@ -320,7 +424,7 @@ mod tests {
                 // Configure engine
                 let public_key = scheme.public_key();
                 let uid = format!("validator-{}", public_key);
-                let config = engine::Config {
+                let config: Config<MockIndexer> = engine::Config {
                     partition_prefix: uid.clone(),
                     signer: scheme.clone(),
                     identity: public.clone(),
@@ -337,6 +441,7 @@ mod tests {
                     max_fetch_size: 1024 * 512,
                     fetch_concurrent: 10,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
+                    indexer: None,
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -353,7 +458,7 @@ mod tests {
                 let metrics = context.encode();
 
                 // Iterate over all lines
-                let mut failed = false;
+                let mut success = true;
                 for line in metrics.lines() {
                     // Ensure it is a metrics line
                     if !line.starts_with("validator-") {
@@ -371,16 +476,16 @@ mod tests {
                         assert_eq!(value, 0);
                     }
 
-                    // If ends with indexed_height, ensure it is at least required_container
-                    if metric.ends_with("_syncer_indexed_height") {
+                    // If ends with contiguous_height, ensure it is at least required_container
+                    if metric.ends_with("_syncer_contiguous_height") {
                         let value = value.parse::<u64>().unwrap();
-                        if value < initial_container_required {
-                            failed = true;
+                        if value >= initial_container_required {
+                            success = true;
                             break;
                         }
                     }
                 }
-                if !failed {
+                if success {
                     break;
                 }
 
@@ -402,7 +507,7 @@ mod tests {
             let share = shares[0];
             let public_key = scheme.public_key();
             let uid = format!("validator-{}", public_key);
-            let config = engine::Config {
+            let config: Config<MockIndexer> = engine::Config {
                 partition_prefix: uid.clone(),
                 signer: scheme.clone(),
                 identity: public.clone(),
@@ -419,6 +524,7 @@ mod tests {
                 max_fetch_size: 1024 * 512,
                 fetch_concurrent: 10,
                 fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
+                indexer: None,
             };
             let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -433,7 +539,7 @@ mod tests {
                 let metrics = context.encode();
 
                 // Iterate over all lines
-                let mut failed = false;
+                let mut success = false;
                 for line in metrics.lines() {
                     // Ensure it is a metrics line
                     if !line.starts_with("validator-") {
@@ -451,16 +557,16 @@ mod tests {
                         assert_eq!(value, 0);
                     }
 
-                    // If ends with indexed_height, ensure it is at least required_container
-                    if metric.ends_with("_syncer_indexed_height") {
+                    // If ends with contiguous_height, ensure it is at least required_container
+                    if metric.ends_with("_syncer_contiguous_height") {
                         let value = value.parse::<u64>().unwrap();
-                        if value < final_container_required {
-                            failed = true;
+                        if value >= final_container_required {
+                            success = true;
                             break;
                         }
                     }
                 }
-                if !failed {
+                if success {
                     break;
                 }
 
@@ -534,7 +640,7 @@ mod tests {
 
                         // Configure engine
                         let uid = format!("validator-{}", public_key);
-                        let config = engine::Config {
+                        let config: Config<MockIndexer> = engine::Config {
                             partition_prefix: uid.clone(),
                             signer: scheme,
                             identity: public.clone(),
@@ -551,6 +657,7 @@ mod tests {
                             max_fetch_size: 1024 * 512,
                             fetch_concurrent: 10,
                             fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
+                            indexer: None,
                         };
                         let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -570,7 +677,7 @@ mod tests {
                                 let metrics = context.encode();
 
                                 // Iterate over all lines
-                                let mut failed = false;
+                                let mut success = false;
                                 for line in metrics.lines() {
                                     // Ensure it is a metrics line
                                     if !line.starts_with("validator-") {
@@ -588,16 +695,16 @@ mod tests {
                                         assert_eq!(value, 0);
                                     }
 
-                                    // If ends with indexed_height, ensure it is at least required_container
-                                    if metric.ends_with("_syncer_indexed_height") {
+                                    // If ends with contiguous_height, ensure it is at least required_container
+                                    if metric.ends_with("_syncer_contiguous_height") {
                                         let value = value.parse::<u64>().unwrap();
-                                        if value < required_container {
-                                            failed = true;
+                                        if value >= required_container {
+                                            success = true;
                                             break;
                                         }
                                     }
                                 }
-                                if !failed {
+                                if success {
                                     break;
                                 }
 
@@ -619,5 +726,140 @@ mod tests {
         }
         assert!(runs > 1);
         info!(runs, "unclean shutdown recovery worked");
+    }
+
+    #[test_traced]
+    fn test_indexer() {
+        // Create context
+        let n = 5;
+        let threshold = quorum(n).unwrap();
+        let required_container = 10;
+        let (executor, mut context, _) = Executor::timed(Duration::from_secs(30));
+        executor.start(async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                simulated::Config {
+                    max_size: 1024 * 1024,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Register participants
+            let mut schemes = Vec::new();
+            let mut validators = Vec::new();
+            for i in 0..n {
+                let scheme = Ed25519::from_seed(i as u64);
+                let pk = scheme.public_key();
+                schemes.push(scheme);
+                validators.push(pk);
+            }
+            validators.sort();
+            schemes.sort_by_key(|s| s.public_key());
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link all validators
+            let link = Link {
+                latency: 10.0,
+                jitter: 1.0,
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &validators, link, None).await;
+
+            // Derive threshold
+            let (public, shares) = ops::generate_shares(&mut context, None, n, threshold);
+
+            // Define mock indexer
+            let indexer = MockIndexer::new("", poly::public(&public).into());
+
+            // Create instances
+            let mut public_keys = HashSet::new();
+            for (idx, scheme) in schemes.into_iter().enumerate() {
+                // Create scheme context
+                let public_key = scheme.public_key();
+                public_keys.insert(public_key.clone());
+
+                // Configure engine
+                let uid = format!("validator-{}", public_key);
+                let config: Config<MockIndexer> = engine::Config {
+                    partition_prefix: uid.clone(),
+                    signer: scheme,
+                    identity: public.clone(),
+                    share: shares[idx],
+                    participants: validators.clone(),
+                    mailbox_size: 1024,
+                    backfill_quota: Quota::per_second(NonZeroU32::new(10).unwrap()),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    nullify_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout: 10,
+                    max_fetch_count: 10,
+                    max_fetch_size: 1024 * 512,
+                    fetch_concurrent: 10,
+                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
+                    indexer: Some(indexer.clone()),
+                };
+                let engine = Engine::new(context.with_label(&uid), config).await;
+
+                // Get networking
+                let (voter, resolver, broadcast, backfill) =
+                    registrations.remove(&public_key).unwrap();
+
+                // Start engine
+                engine.start(voter, resolver, broadcast, backfill);
+            }
+
+            // Poll metrics
+            loop {
+                let metrics = context.encode();
+
+                // Iterate over all lines
+                let mut success = false;
+                for line in metrics.lines() {
+                    // Ensure it is a metrics line
+                    if !line.starts_with("validator-") {
+                        continue;
+                    }
+
+                    // Split metric and value
+                    let mut parts = line.split_whitespace();
+                    let metric = parts.next().unwrap();
+                    let value = parts.next().unwrap();
+
+                    // If ends with peers_blocked, ensure it is zero
+                    if metric.ends_with("_peers_blocked") {
+                        let value = value.parse::<u64>().unwrap();
+                        assert_eq!(value, 0);
+                    }
+
+                    // If ends with contiguous_height, ensure it is at least required_container
+                    if metric.ends_with("_syncer_contiguous_height") {
+                        let value = value.parse::<u64>().unwrap();
+                        if value >= required_container {
+                            success = true;
+                            break;
+                        }
+                    }
+                }
+                if success {
+                    break;
+                }
+
+                // Still waiting for all validators to complete
+                context.sleep(Duration::from_secs(1)).await;
+            }
+
+            // Check indexer uploads
+            assert!(indexer.seed_seen.load(std::sync::atomic::Ordering::Relaxed));
+            assert!(indexer
+                .notarization_seen
+                .load(std::sync::atomic::Ordering::Relaxed));
+            assert!(indexer
+                .finalization_seen
+                .load(std::sync::atomic::Ordering::Relaxed));
+        });
     }
 }

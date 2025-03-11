@@ -11,8 +11,10 @@ pub use actor::Actor;
 mod ingress;
 pub use ingress::Mailbox;
 
+use crate::Indexer;
+
 /// Configuration for the syncer.
-pub struct Config {
+pub struct Config<I: Indexer> {
     pub partition_prefix: String,
 
     pub public_key: PublicKey,
@@ -29,4 +31,6 @@ pub struct Config {
     pub backfill_quota: Quota,
 
     pub activity_timeout: u64,
+
+    pub indexer: Option<I>,
 }

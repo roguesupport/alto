@@ -6,11 +6,15 @@ use super::{
     ingress::{Mailbox, Message},
     Config,
 };
-use crate::actors::syncer::{
-    handler,
-    key::{self, MultiIndex, Value},
+use crate::{
+    actors::syncer::{
+        handler,
+        key::{self, MultiIndex, Value},
+    },
+    Indexer,
 };
 use alto_types::{Block, Finalization, Finalized, Notarized};
+use bytes::Bytes;
 use commonware_cryptography::{bls12381, ed25519::PublicKey, sha256::Digest};
 use commonware_macros::select;
 use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
@@ -42,7 +46,7 @@ use std::{
 use tracing::{debug, info, warn};
 
 /// Application actor.
-pub struct Actor<B: Blob, R: Rng + Spawner + Metrics + Clock + GClock + Storage<B>> {
+pub struct Actor<B: Blob, R: Rng + Spawner + Metrics + Clock + GClock + Storage<B>, I: Indexer> {
     context: R,
     public_key: PublicKey,
     public: bls12381::PublicKey,
@@ -51,6 +55,7 @@ pub struct Actor<B: Blob, R: Rng + Spawner + Metrics + Clock + GClock + Storage<
     mailbox_size: usize,
     backfill_quota: Quota,
     activity_timeout: u64,
+    indexer: Option<I>,
 
     // Blocks verified stored by view<>digest
     verified: Archive<TwoCap, Digest, B, R>,
@@ -64,18 +69,18 @@ pub struct Actor<B: Blob, R: Rng + Spawner + Metrics + Clock + GClock + Storage<
     // We store this separately because we may not have the finalization for a block
     blocks: Archive<EightCap, Digest, B, R>,
 
-    // Indexer storage
-    indexer: Metadata<B, R, FixedBytes<1>>,
+    // Finalizer storage
+    finalizer: Metadata<B, R, FixedBytes<1>>,
 
     // Latest height metric
-    latest_height: Gauge,
+    finalized_height: Gauge,
     // Indexed height metric
-    indexed_height: Gauge,
+    contiguous_height: Gauge,
 }
 
-impl<B: Blob, R: Rng + Spawner + Metrics + Clock + GClock + Storage<B>> Actor<B, R> {
+impl<B: Blob, R: Rng + Spawner + Metrics + Clock + GClock + Storage<B>, I: Indexer> Actor<B, R, I> {
     /// Create a new application actor.
-    pub async fn init(context: R, config: Config) -> (Self, Mailbox) {
+    pub async fn init(context: R, config: Config<I>) -> (Self, Mailbox) {
         // Initialize verified blocks
         let verified_journal = Journal::init(
             context.with_label("verified_journal"),
@@ -168,28 +173,28 @@ impl<B: Blob, R: Rng + Spawner + Metrics + Clock + GClock + Storage<B>> Actor<B,
         .await
         .expect("Failed to initialize finalized archive");
 
-        // Initialize indexer metadata
-        let indexer_metadata = Metadata::init(
-            context.with_label("indexer_metadata"),
+        // Initialize finalizer metadata
+        let finalizer_metadata = Metadata::init(
+            context.with_label("finalizer_metadata"),
             metadata::Config {
-                partition: format!("{}-indexer_metadata", config.partition_prefix),
+                partition: format!("{}-finalizer_metadata", config.partition_prefix),
             },
         )
         .await
-        .expect("Failed to initialize indexer metadata");
+        .expect("Failed to initialize finalizer metadata");
 
         // Create metrics
-        let latest_height = Gauge::default();
+        let finalized_height = Gauge::default();
         context.register(
-            "latest_height",
-            "Latest height of application",
-            latest_height.clone(),
+            "finalized_height",
+            "Finalized height of application",
+            finalized_height.clone(),
         );
-        let indexed_height = Gauge::default();
+        let contiguous_height = Gauge::default();
         context.register(
-            "indexed_height",
-            "Indexed height of application",
-            indexed_height.clone(),
+            "contiguous_height",
+            "Contiguous height of application",
+            contiguous_height.clone(),
         );
 
         // Initialize mailbox
@@ -204,6 +209,7 @@ impl<B: Blob, R: Rng + Spawner + Metrics + Clock + GClock + Storage<B>> Actor<B,
                 mailbox_size: config.mailbox_size,
                 backfill_quota: config.backfill_quota,
                 activity_timeout: config.activity_timeout,
+                indexer: config.indexer,
 
                 verified: verified_archive,
                 notarized: notarized_archive,
@@ -211,10 +217,10 @@ impl<B: Blob, R: Rng + Spawner + Metrics + Clock + GClock + Storage<B>> Actor<B,
                 finalized: finalized_archive,
                 blocks: block_archive,
 
-                indexer: indexer_metadata,
+                finalizer: finalizer_metadata,
 
-                latest_height,
-                indexed_height,
+                finalized_height,
+                contiguous_height,
             },
             Mailbox::new(sender),
         )
@@ -276,8 +282,8 @@ impl<B: Blob, R: Rng + Spawner + Metrics + Clock + GClock + Storage<B>> Actor<B,
         let notarized = Wrapped::new(self.notarized);
         let finalized = Wrapped::new(self.finalized);
         let blocks = Wrapped::new(self.blocks);
-        let (mut indexer_sender, mut indexer_receiver) = mpsc::channel::<()>(1);
-        self.context.with_label("indexer").spawn({
+        let (mut finalizer_sender, mut finalizer_receiver) = mpsc::channel::<()>(1);
+        self.context.with_label("finalizer").spawn({
             let mut resolver = resolver.clone();
             let last_view_processed = last_view_processed.clone();
             let verified = verified.clone();
@@ -287,13 +293,11 @@ impl<B: Blob, R: Rng + Spawner + Metrics + Clock + GClock + Storage<B>> Actor<B,
             move |_| async move {
                 // Initialize last indexed from metadata store
                 let latest_key = FixedBytes::new([0u8]);
-                let mut last_indexed = if let Some(bytes) = self.indexer.get(&latest_key) {
+                let mut last_indexed = if let Some(bytes) = self.finalizer.get(&latest_key) {
                     u64::from_be_bytes(bytes.to_vec().try_into().unwrap())
                 } else {
                     0
                 };
-
-                // TODO: need to handle finalization from finalization gaps (may never exist for a height where we finalize a notarize in a later view)
 
                 // Index all finalized blocks
                 //
@@ -308,9 +312,12 @@ impl<B: Blob, R: Rng + Spawner + Metrics + Clock + GClock + Storage<B>> Actor<B,
                         .expect("Failed to get finalized block");
                     if let Some(block) = block {
                         // Update metadata
-                        self.indexer
+                        self.finalizer
                             .put(latest_key.clone(), next.to_be_bytes().to_vec().into());
-                        self.indexer.sync().await.expect("Failed to sync indexer");
+                        self.finalizer
+                            .sync()
+                            .await
+                            .expect("Failed to sync finalizer");
 
                         // In an application that maintains state, you would compute the state transition function here.
 
@@ -325,7 +332,7 @@ impl<B: Blob, R: Rng + Spawner + Metrics + Clock + GClock + Storage<B>> Actor<B,
                             .await;
 
                         // Update the latest indexed
-                        self.indexed_height.set(next as i64);
+                        self.contiguous_height.set(next as i64);
                         last_indexed = next;
                         info!(height = next, "indexed finalized block");
 
@@ -420,7 +427,7 @@ impl<B: Blob, R: Rng + Spawner + Metrics + Clock + GClock + Storage<B>> Actor<B,
 
                     // If not finalized, wait for some message from someone that finalized store was updated
                     debug!(height = next, "waiting to index finalized block");
-                    let _ = indexer_receiver.next().await;
+                    let _ = finalizer_receiver.next().await;
                 }
             }
         });
@@ -470,7 +477,24 @@ impl<B: Blob, R: Rng + Spawner + Metrics + Clock + GClock + Storage<B>> Actor<B,
                                 .await
                                 .expect("Failed to insert verified block");
                         }
-                        Message::Notarized { proof } => {
+                        Message::Notarized { proof, seed } => {
+                            // Upload seed to indexer (if available)
+                            if let Some(indexer) = self.indexer.as_ref() {
+                                self.context.with_label("indexer").spawn({
+                                    let indexer = indexer.clone();
+                                    let view = proof.view;
+                                    move |_| async move {
+                                        let seed = seed.serialize().into();
+                                        let result = indexer.seed_upload(seed).await;
+                                        if let Err(e) = result {
+                                            warn!(?e, "failed to upload seed");
+                                            return;
+                                        }
+                                        debug!(view, "seed uploaded to indexer");
+                                    }
+                                });
+                            }
+
                             // Check if in buffer
                             let mut block = None;
                             if let Some(buffered) = buffer.get(&proof.payload) {
@@ -490,11 +514,29 @@ impl<B: Blob, R: Rng + Spawner + Metrics + Clock + GClock + Storage<B>> Actor<B,
                                 let height = block.height;
                                 let digest = proof.payload.clone();
                                 let notarization = Notarized::new(proof, block);
+                                let notarization: Bytes = notarization.serialize().into();
                                 notarized
-                                    .put(view, digest, notarization.serialize().into())
+                                    .put(view, digest, notarization.clone())
                                     .await
                                     .expect("Failed to insert notarized block");
                                 debug!(view, height, "notarized block stored");
+
+                                // Upload to indexer (if available)
+                                if let Some(indexer) = self.indexer.as_ref() {
+                                    self.context.with_label("indexer").spawn({
+                                        let indexer = indexer.clone();
+                                        move |_| async move {
+                                            let result = indexer
+                                                .notarization_upload(notarization)
+                                                .await;
+                                            if let Err(e) = result {
+                                                warn!(?e, "failed to upload notarization");
+                                                return;
+                                            }
+                                            debug!(view, "notarization uploaded to indexer");
+                                        }
+                                    });
+                                }
                                 continue;
                             }
 
@@ -506,7 +548,24 @@ impl<B: Blob, R: Rng + Spawner + Metrics + Clock + GClock + Storage<B>> Actor<B,
                             outstanding_notarize.insert(proof.view);
                             resolver.fetch(MultiIndex::new(Value::Notarized(proof.view))).await;
                         }
-                        Message::Finalized { proof } => {
+                        Message::Finalized { proof, seed } => {
+                            // Upload seed to indexer (if available)
+                            if let Some(indexer) = self.indexer.as_ref() {
+                                self.context.with_label("indexer").spawn({
+                                    let indexer = indexer.clone();
+                                    let view = proof.view;
+                                    move |_| async move {
+                                        let seed = seed.serialize().into();
+                                        let result = indexer.seed_upload(seed).await;
+                                        if let Err(e) = result {
+                                            warn!(?e, "failed to upload seed");
+                                            return;
+                                        }
+                                        debug!(view, "seed uploaded to indexer");
+                                    }
+                                });
+                            }
+
                             // Check if in buffer
                             let mut block = None;
                             if let Some(buffered) = buffer.get(&proof.payload){
@@ -554,14 +613,32 @@ impl<B: Blob, R: Rng + Spawner + Metrics + Clock + GClock + Storage<B>> Actor<B,
                                     .await
                                     .expect("Failed to prune notarized block");
 
-                                // Notify indexer
-                                let _ = indexer_sender.try_send(());
+                                // Notify finalizer
+                                let _ = finalizer_sender.try_send(());
 
                                 // Update latest
                                 latest_view = view;
 
                                 // Update metrics
-                                self.latest_height.set(height as i64);
+                                self.finalized_height.set(height as i64);
+
+                                // Upload to indexer (if available)
+                                if let Some(indexer) = self.indexer.as_ref() {
+                                    self.context.with_label("indexer").spawn({
+                                        let indexer = indexer.clone();
+                                        let finalization = Finalized::new(proof, block).serialize().into();
+                                        move |_| async move {
+                                            let result = indexer
+                                                .finalization_upload(finalization)
+                                                .await;
+                                            if let Err(e) = result {
+                                                warn!(?e, "failed to upload finalization");
+                                                return;
+                                            }
+                                            debug!(height, "finalization uploaded to indexer");
+                                        }
+                                    });
+                                }
                                 continue;
                             }
 
@@ -773,8 +850,8 @@ impl<B: Blob, R: Rng + Spawner + Metrics + Clock + GClock + Storage<B>> Actor<B,
                                         }
                                     }
 
-                                    // Notify indexer
-                                    let _ = indexer_sender.try_send(());
+                                    // Notify finalizer
+                                    let _ = finalizer_sender.try_send(());
                                 },
                                 key::Value::Digest(digest) => {
                                     // Parse block
@@ -802,8 +879,8 @@ impl<B: Blob, R: Rng + Spawner + Metrics + Clock + GClock + Storage<B>> Actor<B,
                                         }
                                     }
 
-                                    // Notify indexer
-                                    let _ = indexer_sender.try_send(());
+                                    // Notify finalizer
+                                    let _ = finalizer_sender.try_send(());
                                 }
                             }
                         }
