@@ -47,23 +47,20 @@ interface ViewData {
   timeoutId?: NodeJS.Timeout;
 }
 
-const TIMEOUT_DURATION = 1500; // 1.5 seconds
+const TIMEOUT_DURATION = 750; // 750 milliseconds
 
-// Custom marker icons - updated for monochrome style with circular appearance
-const createCustomIcon = () => {
-  return new DivIcon({
-    className: "custom-div-icon",
-    html: `<div style="
+const markerIcon = new DivIcon({
+  className: "custom-div-icon",
+  html: `<div style="
       background-color: #aaa;
       width: 16px;
       height: 16px;
       border-radius: 50%;
       border: 1px solid black;
     "></div>`,
-    iconSize: [12, 12],
-    iconAnchor: [6, 6],
-  });
-};
+  iconSize: [12, 12],
+  iconAnchor: [6, 6],
+});
 
 // ASCII Logo animation logic
 const initializeLogoAnimations = () => {
@@ -104,6 +101,13 @@ const App: React.FC = () => {
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const currentTimeRef = useRef(Date.now());
   const wsRef = useRef<WebSocket | null>(null);
+
+  // Manage WebSocket lifecycle
+  const handleSeedRef = useRef<typeof handleSeed>(null!);
+  const handleNotarizedRef = useRef<typeof handleNotarization>(null!);
+  const handleFinalizedRef = useRef<typeof handleFinalization>(null!);
+  const isInitializedRef = useRef(false);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Initialize logo animations
   useEffect(() => {
@@ -219,14 +223,28 @@ const App: React.FC = () => {
         setLastObservedView(view);
       }
 
+      // Limit the number of views to 50
+      if (newViews.length > 50) {
+        // Clean up any timeouts for views we're about to remove
+        for (let i = 50; i < newViews.length; i++) {
+          if (newViews[i].timeoutId) {
+            clearTimeout(newViews[i].timeoutId);
+          }
+        }
+        newViews = newViews.slice(0, 50);
+      }
+
       return newViews;
     });
   }, [lastObservedView]);
+
 
   const handleNotarization = useCallback((notarized: NotarizedJs) => {
     const view = notarized.proof.view;
     setViews((prevViews) => {
       const index = prevViews.findIndex((v) => v.view === view);
+      let newViews = [...prevViews];
+
       if (index !== -1) {
         const viewData = prevViews[index];
         // Clear timeout if it exists
@@ -247,23 +265,36 @@ const App: React.FC = () => {
           timeoutId: undefined,
         };
 
-        return [
+        newViews = [
           ...prevViews.slice(0, index),
           updatedView,
           ...prevViews.slice(index + 1),
         ];
+      } else {
+        // If view doesn't exist, create it
+        newViews = [{
+          view,
+          location: undefined,
+          locationName: undefined,
+          status: "notarized",
+          startTime: Date.now(),
+          notarizationTime: Date.now(),
+          block: notarized.block,
+        }, ...prevViews];
       }
 
-      // If view doesn't exist, create it
-      return [{
-        view,
-        location: undefined,
-        locationName: undefined,
-        status: "notarized",
-        startTime: Date.now(),
-        notarizationTime: Date.now(),
-        block: notarized.block,
-      }, ...prevViews];
+      // Limit the number of views to 50
+      if (newViews.length > 50) {
+        // Clean up any timeouts for views we're about to remove
+        for (let i = 50; i < newViews.length; i++) {
+          if (newViews[i].timeoutId) {
+            clearTimeout(newViews[i].timeoutId);
+          }
+        }
+        newViews = newViews.slice(0, 50);
+      }
+
+      return newViews;
     });
   }, []);
 
@@ -271,6 +302,8 @@ const App: React.FC = () => {
     const view = finalized.proof.view;
     setViews((prevViews) => {
       const index = prevViews.findIndex((v) => v.view === view);
+      let newViews = [...prevViews];
+
       if (index !== -1) {
         const viewData = prevViews[index];
         // Clear timeout if it exists
@@ -291,45 +324,87 @@ const App: React.FC = () => {
           timeoutId: undefined,
         };
 
-        return [
+        newViews = [
           ...prevViews.slice(0, index),
           updatedView,
           ...prevViews.slice(index + 1),
         ];
+      } else {
+        // If view doesn't exist, create it
+        newViews = [{
+          view,
+          location: undefined,
+          locationName: undefined,
+          status: "finalized",
+          startTime: Date.now(),
+          finalizationTime: Date.now(),
+          block: finalized.block,
+        }, ...prevViews];
       }
 
-      // If view doesn't exist, create it
-      return [{
-        view,
-        location: undefined,
-        locationName: undefined,
-        status: "finalized",
-        startTime: Date.now(),
-        finalizationTime: Date.now(),
-        block: finalized.block,
-      }, ...prevViews];
+      // Limit the number of views to 50
+      if (newViews.length > 50) {
+        // Clean up any timeouts for views we're about to remove
+        for (let i = 50; i < newViews.length; i++) {
+          if (newViews[i].timeoutId) {
+            clearTimeout(newViews[i].timeoutId);
+          }
+        }
+        newViews = newViews.slice(0, 50);
+      }
+
+      return newViews;
     });
   }, []);
 
-
-  // Update current time every 100ms to force re-render for growing bars
+  // Update current time every 50ms to force re-render for growing bars
   useEffect(() => {
     const interval = setInterval(() => {
       currentTimeRef.current = Date.now();
       // Force re-render without relying on state updates
       setViews(views => [...views]);
-    }, 10);
+    }, 50);
     return () => clearInterval(interval);
   }, []);
 
-  // Initialize WebSocket
+  // Update handler refs when the handlers change
   useEffect(() => {
-    const setup = async () => {
-      await init();
-      connectWebSocket();
-    };
+    handleSeedRef.current = handleSeed;
+  }, [handleSeed]);
+
+  useEffect(() => {
+    handleNotarizedRef.current = handleNotarization;
+  }, [handleNotarization]);
+
+  useEffect(() => {
+    handleFinalizedRef.current = handleFinalization;
+  }, [handleFinalization]);
+
+  // WebSocket connection management with fixed single-connection approach
+  useEffect(() => {
+    // Skip if already initialized to prevent duplicate connections during development mode's double-invocation
+    if (isInitializedRef.current) return;
+    isInitializedRef.current = true;
 
     const connectWebSocket = () => {
+      // Clear any existing reconnection timers
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+
+      // Close existing connection (if any)
+      if (wsRef.current) {
+        try {
+          const ws = wsRef.current;
+          wsRef.current = null;
+          ws.close();
+        } catch (err) {
+          console.error("Error closing existing WebSocket:", err);
+        }
+      }
+
+      // Create new WebSocket connection
       const ws = new WebSocket(BACKEND_URL);
       wsRef.current = ws;
       ws.binaryType = "arraybuffer";
@@ -347,42 +422,67 @@ const App: React.FC = () => {
         switch (kind) {
           case 0: // Seed
             const seed = parse_seed(PUBLIC_KEY, payload);
-            if (seed) handleSeed(seed);
+            if (seed) handleSeedRef.current(seed);
             break;
           case 1: // Notarization
             const notarized = parse_notarized(PUBLIC_KEY, payload);
-            if (notarized) handleNotarization(notarized);
+            if (notarized) handleNotarizedRef.current(notarized);
             break;
           case 3: // Finalization
             const finalized = parse_finalized(PUBLIC_KEY, payload);
-            if (finalized) handleFinalization(finalized);
+            if (finalized) handleFinalizedRef.current(finalized);
             break;
         }
       };
 
       ws.onerror = (error) => {
         console.error("WebSocket error:", error);
-        setIsConnected(false);
       };
 
-      ws.onclose = () => {
-        console.log("WebSocket closed, trying to reconnect in 5 seconds");
+      ws.onclose = (event) => {
+        console.error(`WebSocket closed with code: ${event.code}`);
         setIsConnected(false);
-        setTimeout(connectWebSocket, 5000);
+
+        // Only attempt to reconnect if we still have a reference to this websocket
+        if (wsRef.current === ws) {
+          reconnectTimeoutRef.current = setTimeout(() => {
+            reconnectTimeoutRef.current = null;
+            connectWebSocket();
+          }, 5000);
+        }
       };
+    };
+
+    const setup = async () => {
+      await init();
+      connectWebSocket();
     };
 
     setup();
 
+    // Cleanup function when component unmounts
     return () => {
+      // Clear any reconnection timers
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+
+      // Close and clean up the websocket
       if (wsRef.current) {
-        wsRef.current.close();
+        const ws = wsRef.current;
+        wsRef.current = null; // Clear reference first to prevent reconnection attempts
+        try {
+          ws.close(1000, "Component unmounting");
+        } catch (err) {
+          console.error("Error closing WebSocket during cleanup:", err);
+        }
       }
     };
-  }, [handleSeed, handleNotarization, handleFinalization]);
+  }, []);
 
   // Define center using LatLng
-  const center = new LatLng(20, 0);
+  const center = new LatLng(0, 0);
 
   return (
     <div className="app-container">
@@ -450,7 +550,7 @@ const App: React.FC = () => {
               <Marker
                 key={views[0].view}
                 position={views[0].location}
-                icon={createCustomIcon()}
+                icon={markerIcon}
               >
                 <Popup>
                   <div>
@@ -482,7 +582,7 @@ const App: React.FC = () => {
             </div>
           </div>
           <div className="bars-list">
-            {views.slice(0, 100).map((viewData) => (
+            {views.slice(0, 50).map((viewData) => (
               <Bar
                 key={viewData.view}
                 viewData={viewData}
