@@ -28,10 +28,10 @@ cargo run --bin setup -- generate --peers 10 --bootstrappers 2 --regions us-west
 ### [Optional] Configure Indexer Upload
 
 ```bash
-cargo run --bin setup -- indexer --dir assets --url <indexer URL>
+cargo run --bin setup -- indexer --count <uploaders> --dir assets --url <indexer URL>
 ```
 
-_The indexer URL is configured separately because it is typically only known after the threshold key is generated (derived in `setup generate`)._
+_The indexer URL is configured separately because it is typically only known after the threshold key is generated (derived in `setup generate`). The iteration order of this command is deterministic (re-running will update the same configuration files)._
 
 ### Build Validator Binary
 
