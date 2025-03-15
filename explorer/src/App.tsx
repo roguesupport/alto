@@ -8,6 +8,11 @@ import { SeedJs, NotarizedJs, FinalizedJs, BlockJs } from "./types";
 import "./App.css";
 import AboutModal from './AboutModal';
 import './AboutModal.css';
+import StatsSection from "./StatsSection";
+import './StatsSection.css';
+import KeyInfoModal from './KeyModal';
+import MapOverlay from './MapOverlay';
+import './MapOverlay.css';
 
 // Export PUBLIC_KEY as a Uint8Array for use in the application
 const PUBLIC_KEY = hexToUint8Array(PUBLIC_KEY_HEX);
@@ -80,6 +85,7 @@ const App: React.FC = () => {
   const [views, setViews] = useState<ViewData[]>([]);
   const [lastObservedView, setLastObservedView] = useState<number | null>(null);
   const [isAboutModalOpen, setIsAboutModalOpen] = useState<boolean>(false);
+  const [isKeyInfoModalOpen, setIsKeyInfoModalOpen] = useState<boolean>(false);
   const [isMobile, setIsMobile] = useState<boolean>(false);
   const currentTimeRef = useRef(Date.now());
   const wsRef = useRef<WebSocket | null>(null);
@@ -604,6 +610,12 @@ const App: React.FC = () => {
         </div>
         <div className="about-button-container">
           <button
+            className="key-header-button"
+            onClick={() => setIsKeyInfoModalOpen(true)}
+          >
+            ⚷
+          </button>
+          <button
             className="about-header-button"
             onClick={() => setIsAboutModalOpen(true)}
           >
@@ -614,17 +626,13 @@ const App: React.FC = () => {
 
       <main className="app-main">
         {/* Network Key */}
-        <div className="public-key-display">
-          <span className="public-key-label">Network Key:</span>
-          <span className="public-key-value">{PUBLIC_KEY_HEX}</span>
-        </div>
 
         {/* Map */}
         <div className="map-container">
-          <MapContainer center={center} zoom={1} style={{ height: "100%", width: "100%" }}>
+          <MapContainer center={center} zoom={1} style={{ height: "100%", width: "100%" }} zoomControl={false} scrollWheelZoom={false} doubleClickZoom={false} touchZoom={false} dragging={false}>
             <TileLayer
-              url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
-              attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> | &copy; <a href="https://carto.com/attributions">CARTO</a>'
+              url="https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png"
+              attribution='&copy; OSM | &copy; CARTO</a>'
             />
             {views.length > 0 && views[0].location !== undefined && (
               <Marker
@@ -647,19 +655,27 @@ const App: React.FC = () => {
                 </Popup>
               </Marker>
             )}
+            <MapOverlay numValidators={LOCATIONS.length} />
           </MapContainer>
         </div>
+
+        {/* Stats Section */}
+        <StatsSection
+          views={views}
+          numValidators={LOCATIONS.length}
+        />
 
         {/* Bars with integrated legend */}
         <div className="bars-container">
           <div className="bars-header">
-            <h2 className="bars-title">Views</h2>
+            <h2 className="bars-title">Timeline</h2>
             <div className="legend-container">
               <LegendItem color="#0000eeff" label="Seed" />
-              <LegendItem color="#000" label="Prepared" />
+              <LegendItem color="#000" label="Locked" />
               <LegendItem color="#274e13ff" label="Finalized" />
             </div>
           </div>
+
           <div className="bars-list">
             {views.slice(0, 50).map((viewData) => (
               <Bar
@@ -678,6 +694,11 @@ const App: React.FC = () => {
       </footer>
 
       <AboutModal isOpen={isAboutModalOpen} onClose={() => setIsAboutModalOpen(false)} />
+      <KeyInfoModal
+        isOpen={isKeyInfoModalOpen}
+        onClose={() => setIsKeyInfoModalOpen(false)}
+        publicKeyHex={PUBLIC_KEY_HEX}
+      />
     </div >
   );
 };
