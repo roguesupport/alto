@@ -14,6 +14,8 @@ import KeyInfoModal from './KeyModal';
 import MapOverlay from './MapOverlay';
 import './MapOverlay.css';
 import { useClockSkew } from './useClockSkew';
+import ErrorNotification from './ErrorNotification';
+import './ErrorNotification.css';
 
 // Export PUBLIC_KEY as a Uint8Array for use in the application
 const PUBLIC_KEY = hexToUint8Array(PUBLIC_KEY_HEX);
@@ -88,6 +90,8 @@ const App: React.FC = () => {
   const [isAboutModalOpen, setIsAboutModalOpen] = useState<boolean>(false);
   const [isKeyInfoModalOpen, setIsKeyInfoModalOpen] = useState<boolean>(false);
   const [isMobile, setIsMobile] = useState<boolean>(false);
+  const [errorMessage, setErrorMessage] = useState<string>("");
+  const [showError, setShowError] = useState<boolean>(false);
   const adjustTime = useClockSkew();
   const currentTimeRef = useRef(adjustTime(Date.now()));
   const wsRef = useRef<WebSocket | null>(null);
@@ -491,12 +495,15 @@ const App: React.FC = () => {
       }
 
       // Create new WebSocket connection
+      const wsCreationTime = Date.now();
       const ws = new WebSocket(BACKEND_URL);
       wsRef.current = ws;
       ws.binaryType = "arraybuffer";
 
       ws.onopen = () => {
         console.log("WebSocket connected");
+        setErrorMessage("");
+        setShowError(false);
       };
 
       ws.onmessage = (event) => {
@@ -527,12 +534,25 @@ const App: React.FC = () => {
       ws.onclose = (event) => {
         console.error(`WebSocket closed with code: ${event.code}`);
 
-        // Only attempt to reconnect if we still have a reference to this websocket
+        // Check for potential rate limiting (code 1006 is "Abnormal Closure")
+        if (event.code === 1006) {
+          // If connection closed very quickly, likely rate-limited
+          const timeSinceStarted = Date.now() - wsCreationTime;
+          if (timeSinceStarted < 1000) {
+            setErrorMessage("Too many connection attempts from your IP. Try connecting again in an hour.");
+            setShowError(true);
+
+            // Clear reference to prevent reconnection
+            wsRef.current = null;
+          }
+        }
+
+        // Only attempt to reconnect if we still have a reference to this websocket (and we didn't detect a rate limit error)
         if (wsRef.current === ws) {
           reconnectTimeoutRef.current = setTimeout(() => {
             reconnectTimeoutRef.current = null;
             connectWebSocket();
-          }, 5000);
+          }, 11000);
         }
       };
     };
@@ -570,6 +590,12 @@ const App: React.FC = () => {
 
   return (
     <div className="app-container">
+      <ErrorNotification
+        message={errorMessage}
+        isVisible={showError}
+        onDismiss={() => setShowError(false)}
+        autoHideDuration={15000}
+      />
       <header className="app-header">
         <div className="logo-container">
           <div className="logo-line">
@@ -627,8 +653,6 @@ const App: React.FC = () => {
       </header>
 
       <main className="app-main">
-        {/* Network Key */}
-
         {/* Map */}
         <div className="map-container">
           <MapContainer center={center} zoom={1} style={{ height: "100%", width: "100%" }} zoomControl={false} scrollWheelZoom={false} doubleClickZoom={false} touchZoom={false} dragging={false}>
@@ -664,7 +688,7 @@ const App: React.FC = () => {
         {/* Stats Section */}
         <StatsSection
           views={views}
-          numValidators={LOCATIONS.length}
+          connectionError={errorMessage.length > 0}
         />
 
         {/* Bars with integrated legend */}
