@@ -27,15 +27,15 @@
 }
 
 .connection-status-badge.error {
-    background-color: rgba(244, 67, 54, 0.1);
-    color: #f44336;
-    border: 1px solid #f44336;
+    background-color: rgba(255, 0, 0, 0.1);
+    color: #ff0000;
+    border: 1px solid #ff0000;
 }
 
 .connection-status-badge.success {
-    background-color: rgba(39, 78, 19, 0.1);
-    color: #274e13;
-    border: 1px solid #274e13;
+    background-color: rgba(34, 139, 34, 0.1);
+    color: #228B22;
+    border: 1px solid #228B22;
 }
 
 .connection-status-dot {
@@ -47,12 +47,12 @@
 }
 
 .connection-status-dot.error {
-    background-color: #f44336;
+    background-color: #ff0000;
     animation: pulse 1.5s infinite;
 }
 
 .connection-status-dot.success {
-    background-color: #274e13;
+    background-color: #228B22;
 }
 
 /* Remove the old connection-error classes since they're replaced */
