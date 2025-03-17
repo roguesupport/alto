@@ -723,6 +723,11 @@ const App: React.FC = () => {
       </main >
 
       <footer className="footer">
+        <div className="socials">
+          <a href="https://commonware.xyz/hiring.html">Hiring</a>
+          <a href="https://github.com/commonwarexyz/alto">GitHub</a>
+          <a href="https://x.com/commonwarexyz">X</a>
+        </div>
         &copy; {new Date().getFullYear()} Commonware, Inc. All rights reserved.
       </footer>
 
