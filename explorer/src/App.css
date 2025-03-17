@@ -61,7 +61,6 @@ body {
 /* Map container */
 .map-container {
   height: 300px;
-  margin-bottom: 16px;
   border: 1px solid #ccc;
   border-radius: 0;
   overflow: hidden;
@@ -98,7 +97,7 @@ body {
 }
 
 .legend-label {
-  font-size: 12px;
+  font-size: 13px;
   white-space: nowrap;
 }
 
@@ -115,7 +114,7 @@ body {
 .bars-container {
   background: white;
   border: 1px solid #ccc;
-  padding: 12px 8px 12px 12px;
+  padding: 16px;
   width: 100%;
   overflow-x: hidden;
   max-width: 100%;
@@ -390,7 +389,6 @@ body {
 
   .map-container {
     height: 400px;
-    margin-bottom: 20px;
   }
 
   .bar-row {
@@ -419,7 +417,7 @@ body {
   }
 
   .legend-label {
-    font-size: 14px;
+    font-size: 13px;
   }
 
   .legend-item {
@@ -447,10 +445,6 @@ body {
 
   .map-container {
     height: 250px;
-  }
-
-  .bars-container {
-    padding: 10px 4px 10px 12px;
   }
 
   .bar-row {
