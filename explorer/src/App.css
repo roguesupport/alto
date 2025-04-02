@@ -544,3 +544,41 @@ body {
     font-size: 0.8rem;
   }
 }
+
+
+.search-header-button {
+  background: #ffb200;
+  border: 1px solid #ffb200;
+  cursor: pointer;
+  font-family: 'Consolas', monospace;
+  font-size: 0.9rem;
+  color: white;
+  -webkit-appearance: none;
+  appearance: none;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-fill-color: white;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0;
+  margin-right: 6px;
+}
+
+.search-header-button:hover,
+.search-header-button:focus,
+.search-header-button:active,
+.search-header-button:visited {
+  background-color: #f0f0f0;
+  text-decoration: none;
+  color: #ffb200;
+  -webkit-text-fill-color: #ffb200;
+}
+
+@media (max-width: 480px) {
+  .search-header-button {
+    font-size: 0.8rem;
+  }
+}
