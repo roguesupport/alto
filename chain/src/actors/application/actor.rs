@@ -4,9 +4,8 @@ use super::{
     Config,
 };
 use crate::actors::syncer;
-use alto_types::{Block, Finalization, Notarization, Seed};
-use commonware_consensus::threshold_simplex::Prover;
-use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+use alto_types::Block;
+use commonware_cryptography::{Digestible, Hasher, Sha256};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use commonware_utils::SystemTimeExt;
@@ -55,7 +54,6 @@ const SYNCHRONY_BOUND: u64 = 500;
 /// Application actor.
 pub struct Actor<R: Rng + Spawner + Metrics + Clock> {
     context: R,
-    prover: Prover<Digest>,
     hasher: Sha256,
     mailbox: mpsc::Receiver<Message>,
 }
@@ -67,7 +65,6 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
         (
             Self {
                 context,
-                prover: config.prover,
                 hasher: Sha256::new(),
                 mailbox,
             },
@@ -212,26 +209,6 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
                             }
                         }
                     });
-                }
-                Message::Prepared { proof, payload } => {
-                    // Parse the proof
-                    let (view, parent, _, signature, seed) =
-                        self.prover.deserialize_notarization(proof).unwrap();
-                    let notarization = Notarization::new(view, parent, payload, signature.into());
-                    let seed = Seed::new(view, seed.into());
-
-                    // Send the notarization to the syncer
-                    syncer.notarized(notarization, seed).await;
-                }
-                Message::Finalized { proof, payload } => {
-                    // Parse the proof
-                    let (view, parent, _, signature, seed) =
-                        self.prover.deserialize_finalization(proof.clone()).unwrap();
-                    let finalization = Finalization::new(view, parent, payload, signature.into());
-                    let seed = Seed::new(view, seed.into());
-
-                    // Send the finalization to the syncer
-                    syncer.finalized(finalization, seed).await;
                 }
             }
         }

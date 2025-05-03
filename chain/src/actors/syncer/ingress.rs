@@ -1,4 +1,8 @@
-use alto_types::{Block, Finalization, Notarization, Seed};
+use alto_types::Block;
+use commonware_consensus::{
+    threshold_simplex::types::{Activity, Finalization, Notarization},
+    Reporter,
+};
 use commonware_cryptography::sha256::Digest;
 use futures::{
     channel::{mpsc, oneshot},
@@ -19,13 +23,11 @@ pub enum Message {
         view: u64,
         payload: Block,
     },
-    Notarized {
-        proof: Notarization,
-        seed: Seed,
+    Notarization {
+        notarization: Notarization<Digest>,
     },
-    Finalized {
-        proof: Finalization,
-        seed: Seed,
+    Finalization {
+        finalization: Finalization<Digest>,
     },
 }
 
@@ -69,18 +71,89 @@ impl Mailbox {
             .await
             .expect("Failed to send lock");
     }
+}
 
-    pub async fn notarized(&mut self, proof: Notarization, seed: Seed) {
-        self.sender
-            .send(Message::Notarized { proof, seed })
-            .await
-            .expect("Failed to send lock");
+impl Reporter for Mailbox {
+    type Activity = Activity<Digest>;
+
+    async fn report(&mut self, activity: Self::Activity) {
+        match activity {
+            Activity::Notarization(notarization) => {
+                self.sender
+                    .send(Message::Notarization { notarization })
+                    .await
+                    .expect("Failed to send notarization");
+            }
+            Activity::Finalization(finalization) => {
+                self.sender
+                    .send(Message::Finalization { finalization })
+                    .await
+                    .expect("Failed to send finalization");
+            }
+            _ => {
+                // Ignore other activity types
+            }
+        }
+    }
+}
+
+/// Enum representing the different types of messages that the `Finalizer` loop
+/// can send to the inner actor loop.
+///
+/// We break this into a separate enum to establish a separate priority for consensus messages.
+pub enum Orchestration {
+    Get {
+        next: u64,
+        result: oneshot::Sender<Option<Block>>,
+    },
+    Processed {
+        next: u64,
+        digest: Digest,
+    },
+    Repair {
+        next: u64,
+        result: oneshot::Sender<bool>,
+    },
+}
+
+#[derive(Clone)]
+pub struct Orchestrator {
+    sender: mpsc::Sender<Orchestration>,
+}
+
+impl Orchestrator {
+    pub fn new(sender: mpsc::Sender<Orchestration>) -> Self {
+        Self { sender }
     }
 
-    pub async fn finalized(&mut self, proof: Finalization, seed: Seed) {
+    pub async fn get(&mut self, next: u64) -> Option<Block> {
+        let (response, receiver) = oneshot::channel();
         self.sender
-            .send(Message::Finalized { proof, seed })
+            .send(Orchestration::Get {
+                next,
+                result: response,
+            })
             .await
-            .expect("Failed to send lock");
+            .expect("Failed to send get");
+        receiver.await.unwrap()
+    }
+
+    pub async fn processed(&mut self, next: u64, digest: Digest) {
+        self.sender
+            .send(Orchestration::Processed { next, digest })
+            .await
+            .expect("Failed to send processed");
+    }
+
+    pub async fn repair(&mut self, next: u64) -> bool {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(Orchestration::Repair {
+                next,
+                result: response,
+            })
+            .await
+            .expect("Failed to send repair");
+        receiver.await.unwrap()
     }
 }

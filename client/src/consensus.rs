@@ -1,6 +1,8 @@
 use crate::{Client, Error, IndexQuery, Query};
-use alto_types::{Block, Finalized, Kind, Notarized, Seed};
-use bytes::Bytes;
+use alto_types::{Block, Finalized, Kind, Notarized, NAMESPACE};
+use commonware_codec::{DecodeExt, Encode};
+use commonware_consensus::threshold_simplex::types::{Seed, Viewable};
+use commonware_cryptography::Digestible;
 use futures::{channel::mpsc::unbounded, Stream, StreamExt};
 use tokio_tungstenite::{connect_async, tungstenite::Message as TMessage};
 
@@ -50,11 +52,11 @@ pub enum Message {
 }
 
 impl Client {
-    pub async fn seed_upload(&self, seed: Bytes) -> Result<(), Error> {
+    pub async fn seed_upload(&self, seed: Seed) -> Result<(), Error> {
         let result = self
             .client
             .post(seed_upload_path(self.uri.clone()))
-            .body(seed)
+            .body(seed.encode().to_vec())
             .send()
             .await
             .map_err(Error::Reqwest)?;
@@ -76,25 +78,28 @@ impl Client {
             return Err(Error::Failed(result.status()));
         }
         let bytes = result.bytes().await.map_err(Error::Reqwest)?;
-        let result = Seed::deserialize(Some(&self.public), &bytes).ok_or(Error::InvalidData)?;
+        let seed = Seed::decode(bytes.as_ref()).map_err(Error::InvalidData)?;
+        if !seed.verify(NAMESPACE, self.public.as_ref()) {
+            return Err(Error::InvalidSignature);
+        }
 
         // Verify the seed matches the query
         match query {
             IndexQuery::Latest => {}
             IndexQuery::Index(index) => {
-                if result.view != index {
-                    return Err(Error::InvalidData);
+                if seed.view() != index {
+                    return Err(Error::UnexpectedResponse);
                 }
             }
         }
-        Ok(result)
+        Ok(seed)
     }
 
-    pub async fn notarization_upload(&self, notarized: Bytes) -> Result<(), Error> {
+    pub async fn notarized_upload(&self, notarized: Notarized) -> Result<(), Error> {
         let result = self
             .client
             .post(notarization_upload_path(self.uri.clone()))
-            .body(notarized)
+            .body(notarized.encode().to_vec())
             .send()
             .await
             .map_err(Error::Reqwest)?;
@@ -104,7 +109,7 @@ impl Client {
         Ok(())
     }
 
-    pub async fn notarization_get(&self, query: IndexQuery) -> Result<Notarized, Error> {
+    pub async fn notarized_get(&self, query: IndexQuery) -> Result<Notarized, Error> {
         // Get the notarization
         let result = self
             .client
@@ -116,26 +121,28 @@ impl Client {
             return Err(Error::Failed(result.status()));
         }
         let bytes = result.bytes().await.map_err(Error::Reqwest)?;
-        let result =
-            Notarized::deserialize(Some(&self.public), &bytes).ok_or(Error::InvalidData)?;
+        let notarized = Notarized::decode(bytes.as_ref()).map_err(Error::InvalidData)?;
+        if !notarized.verify(NAMESPACE, self.public.as_ref()) {
+            return Err(Error::InvalidSignature);
+        }
 
         // Verify the notarization matches the query
         match query {
             IndexQuery::Latest => {}
             IndexQuery::Index(index) => {
-                if result.proof.view != index {
-                    return Err(Error::InvalidData);
+                if notarized.proof.view() != index {
+                    return Err(Error::UnexpectedResponse);
                 }
             }
         }
-        Ok(result)
+        Ok(notarized)
     }
 
-    pub async fn finalization_upload(&self, finalized: Bytes) -> Result<(), Error> {
+    pub async fn finalized_upload(&self, finalized: Finalized) -> Result<(), Error> {
         let result = self
             .client
             .post(finalization_upload_path(self.uri.clone()))
-            .body(finalized)
+            .body(finalized.encode().to_vec())
             .send()
             .await
             .map_err(Error::Reqwest)?;
@@ -145,7 +152,7 @@ impl Client {
         Ok(())
     }
 
-    pub async fn finalization_get(&self, query: IndexQuery) -> Result<Finalized, Error> {
+    pub async fn finalized_get(&self, query: IndexQuery) -> Result<Finalized, Error> {
         // Get the finalization
         let result = self
             .client
@@ -157,19 +164,21 @@ impl Client {
             return Err(Error::Failed(result.status()));
         }
         let bytes = result.bytes().await.map_err(Error::Reqwest)?;
-        let result =
-            Finalized::deserialize(Some(&self.public), &bytes).ok_or(Error::InvalidData)?;
+        let finalized = Finalized::decode(bytes.as_ref()).map_err(Error::InvalidData)?;
+        if !finalized.verify(NAMESPACE, self.public.as_ref()) {
+            return Err(Error::InvalidSignature);
+        }
 
         // Verify the finalization matches the query
         match query {
             IndexQuery::Latest => {}
             IndexQuery::Index(index) => {
-                if result.proof.view != index {
-                    return Err(Error::InvalidData);
+                if finalized.proof.view() != index {
+                    return Err(Error::UnexpectedResponse);
                 }
             }
         }
-        Ok(result)
+        Ok(finalized)
     }
 
     pub async fn block_get(&self, query: Query) -> Result<Payload, Error> {
@@ -188,22 +197,26 @@ impl Client {
         // Verify the block matches the query
         let result = match query {
             Query::Latest => {
-                let result =
-                    Finalized::deserialize(Some(&self.public), &bytes).ok_or(Error::InvalidData)?;
+                let result = Finalized::decode(bytes.as_ref()).map_err(Error::InvalidData)?;
+                if !result.verify(NAMESPACE, self.public.as_ref()) {
+                    return Err(Error::InvalidSignature);
+                }
                 Payload::Finalized(Box::new(result))
             }
             Query::Index(index) => {
-                let result =
-                    Finalized::deserialize(Some(&self.public), &bytes).ok_or(Error::InvalidData)?;
+                let result = Finalized::decode(bytes.as_ref()).map_err(Error::InvalidData)?;
+                if !result.verify(NAMESPACE, self.public.as_ref()) {
+                    return Err(Error::InvalidSignature);
+                }
                 if result.block.height != index {
-                    return Err(Error::InvalidData);
+                    return Err(Error::UnexpectedResponse);
                 }
                 Payload::Finalized(Box::new(result))
             }
             Query::Digest(digest) => {
-                let result = Block::deserialize(&bytes).ok_or(Error::InvalidData)?;
+                let result = Block::decode(bytes.as_ref()).map_err(Error::InvalidData)?;
                 if result.digest() != digest {
-                    return Err(Error::InvalidData);
+                    return Err(Error::UnexpectedResponse);
                 }
                 Payload::Block(result)
             }
@@ -228,7 +241,7 @@ impl Client {
                         // Get kind
                         let kind = data[0];
                         let Some(kind) = Kind::from_u8(kind) else {
-                            let _ = sender.unbounded_send(Err(Error::InvalidData));
+                            let _ = sender.unbounded_send(Err(Error::UnexpectedResponse));
                             return;
                         };
                         let data = &data[1..];
@@ -236,27 +249,53 @@ impl Client {
                         // Deserialize the message
                         match kind {
                             Kind::Seed => {
-                                if let Some(seed) = Seed::deserialize(Some(&public), data) {
-                                    let _ = sender.unbounded_send(Ok(Message::Seed(seed)));
-                                } else {
-                                    let _ = sender.unbounded_send(Err(Error::InvalidData));
+                                let result = Seed::decode(data);
+                                match result {
+                                    Ok(seed) => {
+                                        if !seed.verify(NAMESPACE, public.as_ref()) {
+                                            let _ =
+                                                sender.unbounded_send(Err(Error::InvalidSignature));
+                                            return;
+                                        }
+                                        let _ = sender.unbounded_send(Ok(Message::Seed(seed)));
+                                    }
+                                    Err(e) => {
+                                        let _ = sender.unbounded_send(Err(Error::InvalidData(e)));
+                                    }
                                 }
                             }
                             Kind::Notarization => {
-                                if let Some(payload) = Notarized::deserialize(Some(&public), data) {
-                                    let _ =
-                                        sender.unbounded_send(Ok(Message::Notarization(payload)));
-                                } else {
-                                    let _ = sender.unbounded_send(Err(Error::InvalidData));
+                                let result = Notarized::decode(data);
+                                match result {
+                                    Ok(notarized) => {
+                                        if !notarized.verify(NAMESPACE, public.as_ref()) {
+                                            let _ =
+                                                sender.unbounded_send(Err(Error::InvalidSignature));
+                                            return;
+                                        }
+                                        let _ = sender
+                                            .unbounded_send(Ok(Message::Notarization(notarized)));
+                                    }
+                                    Err(e) => {
+                                        let _ = sender.unbounded_send(Err(Error::InvalidData(e)));
+                                    }
                                 }
                             }
-                            Kind::Nullification => {} // Ignore nullifications
                             Kind::Finalization => {
-                                if let Some(payload) = Finalized::deserialize(Some(&public), data) {
-                                    let _ =
-                                        sender.unbounded_send(Ok(Message::Finalization(payload)));
-                                } else {
-                                    let _ = sender.unbounded_send(Err(Error::InvalidData));
+                                let result = Finalized::decode(data);
+                                match result {
+                                    Ok(finalized) => {
+                                        if !finalized.verify(NAMESPACE, public.as_ref()) {
+                                            let _ =
+                                                sender.unbounded_send(Err(Error::InvalidSignature));
+                                            return;
+                                        }
+                                        let _ = sender
+                                            .unbounded_send(Ok(Message::Finalization(finalized)));
+                                    }
+                                    Err(e) => {
+                                        let _ = sender.unbounded_send(Err(Error::InvalidData(e)));
+                                    }
                                 }
                             }
                         }

@@ -1,37 +1,28 @@
-use alto_chain::{engine, Config};
+use alto_chain::{engine, Config, Peers};
 use alto_client::Client;
-use alto_types::P2P_NAMESPACE;
-use axum::{routing::get, serve, Extension, Router};
+use alto_types::NAMESPACE;
 use clap::{Arg, Command};
+use commonware_codec::{Decode, DecodeExt};
 use commonware_cryptography::{
-    bls12381::primitives::{
-        group::{self, Element},
-        poly,
-    },
+    bls12381::primitives::{group, poly},
     ed25519::{PrivateKey, PublicKey},
-    Ed25519, Scheme,
+    Ed25519, Signer,
 };
-use commonware_deployer::ec2::Peers;
+use commonware_deployer::ec2::Hosts;
 use commonware_p2p::authenticated;
-use commonware_runtime::{tokio, Clock, Metrics, Network, Runner, Spawner};
-use commonware_utils::{from_hex_formatted, hex, quorum};
+use commonware_runtime::{tokio, Metrics, Runner};
+use commonware_utils::{from_hex_formatted, quorum, union_unique};
 use futures::future::try_join_all;
 use governor::Quota;
-use prometheus_client::metrics::gauge::Gauge;
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroU32,
     path::PathBuf,
     str::FromStr,
-    sync::atomic::{AtomicI64, AtomicU64},
     time::Duration,
 };
-use sysinfo::{Disks, System};
 use tracing::{error, info, Level};
-
-const SYSTEM_METRICS_REFRESH: Duration = Duration::from_secs(5);
-const METRICS_PORT: u16 = 9090;
 
 const VOTER_CHANNEL: u32 = 0;
 const RESOLVER_CHANNEL: u32 = 1;
@@ -49,115 +40,153 @@ const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 const MAX_FETCH_COUNT: usize = 16;
 const MAX_FETCH_SIZE: usize = 512 * 1024;
 
-/// Parse the log level.
-fn parse_log_level(level: &str) -> Option<Level> {
-    match level {
-        "trace" => Some(Level::TRACE),
-        "debug" => Some(Level::DEBUG),
-        "info" => Some(Level::INFO),
-        "warn" => Some(Level::WARN),
-        "error" => Some(Level::ERROR),
-        _ => None,
-    }
-}
-
 fn main() {
     // Parse arguments
     let matches = Command::new("validator")
         .about("Validator for an alto chain.")
-        .arg(Arg::new("peers").long("peers").required(true))
+        .arg(Arg::new("hosts").long("hosts").required(false))
+        .arg(Arg::new("peers").long("peers").required(false))
         .arg(Arg::new("config").long("config").required(true))
         .get_matches();
 
-    // Load peers
-    let peer_file = matches.get_one::<String>("peers").unwrap();
-    let peers_file = std::fs::read_to_string(peer_file).expect("Could not read peers file");
-    let peers: Peers = serde_yaml::from_str(&peers_file).expect("Could not parse peers file");
-    let peers: HashMap<PublicKey, IpAddr> = peers
-        .peers
-        .into_iter()
-        .map(|peer| {
-            let key = from_hex_formatted(&peer.name).expect("Could not parse peer key");
-            let key = PublicKey::try_from(key).expect("Peer key is invalid");
-            (key, peer.ip)
-        })
-        .collect();
-    info!(peers = peers.len(), "loaded peers");
-    let peers_u32 = peers.len() as u32;
+    // Load ip file
+    let hosts_file = matches.get_one::<String>("hosts");
+    let peers_file = matches.get_one::<String>("peers");
+    assert!(
+        hosts_file.is_some() || peers_file.is_some(),
+        "Either --hosts or --peers must be provided"
+    );
 
     // Load config
     let config_file = matches.get_one::<String>("config").unwrap();
     let config_file = std::fs::read_to_string(config_file).expect("Could not read config file");
     let config: Config = serde_yaml::from_str(&config_file).expect("Could not parse config file");
     let key = from_hex_formatted(&config.private_key).expect("Could not parse private key");
-    let key = PrivateKey::try_from(key).expect("Private key is invalid");
-    let signer = <Ed25519 as Scheme>::from(key).expect("Could not create signer");
-    let share = from_hex_formatted(&config.share).expect("Could not parse share");
-    let share = group::Share::deserialize(&share).expect("Share is invalid");
-    let threshold = quorum(peers_u32).expect("unable to derive quorum");
-    let identity = from_hex_formatted(&config.identity).expect("Could not parse identity");
-    let identity = poly::Public::deserialize(&identity, threshold).expect("Identity is invalid");
-    let identity_public = *poly::public(&identity);
+    let key = PrivateKey::decode(key.as_ref()).expect("Private key is invalid");
+    let signer = <Ed25519 as Signer>::from(key).expect("Could not create signer");
     let public_key = signer.public_key();
-    let ip = peers.get(&public_key).expect("Could not find self in IPs");
-    info!(
-        ?public_key,
-        identity = hex(&identity_public.serialize()),
-        ?ip,
-        port = config.port,
-        "loaded config"
-    );
-
-    // Create logger
-    let log_level = parse_log_level(&config.log_level).expect("Invalid log level");
-    tracing_subscriber::fmt()
-        .json()
-        .with_max_level(log_level)
-        .with_line_number(true)
-        .with_file(true)
-        .init();
-
-    // Configure peers and bootstrappers
-    let peer_keys = peers.keys().cloned().collect::<Vec<_>>();
-    let mut bootstrappers = Vec::new();
-    for bootstrapper in &config.bootstrappers {
-        let key = from_hex_formatted(bootstrapper).expect("Could not parse bootstrapper key");
-        let key = PublicKey::try_from(key).expect("Bootstrapper key is invalid");
-        let ip = peers.get(&key).expect("Could not find bootstrapper in IPs");
-        let bootstrapper_socket = format!("{}:{}", ip, config.port);
-        let bootstrapper_socket = SocketAddr::from_str(&bootstrapper_socket)
-            .expect("Could not parse bootstrapper socket");
-        bootstrappers.push((key, bootstrapper_socket));
-    }
 
     // Initialize runtime
-    let cfg = tokio::Config {
-        tcp_nodelay: Some(true),
-        worker_threads: config.worker_threads,
-        storage_directory: PathBuf::from(config.directory),
-        ..Default::default()
-    };
-    let (executor, context) = tokio::Executor::init(cfg);
-
-    // Configure network
-    let mut p2p_cfg = authenticated::Config::aggressive(
-        signer.clone(),
-        P2P_NAMESPACE,
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
-        SocketAddr::new(*ip, config.port),
-        bootstrappers,
-        MAX_MESSAGE_SIZE,
-    );
-    p2p_cfg.mailbox_size = config.mailbox_size;
+    let cfg = tokio::Config::default()
+        .with_tcp_nodelay(Some(true))
+        .with_worker_threads(config.worker_threads)
+        .with_storage_directory(PathBuf::from(config.directory))
+        .with_catch_panics(false);
+    let executor = tokio::Runner::new(cfg);
 
     // Start runtime
-    executor.start(async move {
+    executor.start(|context| async move {
+        // Configure telemetry
+        let log_level = Level::from_str(&config.log_level).expect("Invalid log level");
+        tokio::telemetry::init(
+            context.with_label("telemetry"),
+            tokio::telemetry::Logging {
+                level: log_level,
+                // If we are using `commonware-deployer`, we should use structured logging.
+                json: hosts_file.is_some(),
+            },
+            Some(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                config.metrics_port,
+            )),
+            None,
+        );
+
+        // Load peers
+        let (ip, peers, bootstrappers) = if let Some(hosts_file) = hosts_file {
+            let hosts_file = std::fs::read_to_string(hosts_file).unwrap();
+            let hosts: Hosts =
+                serde_yaml::from_str(&hosts_file).expect("Could not parse peers file");
+            let peers: HashMap<PublicKey, IpAddr> = hosts
+                .hosts
+                .into_iter()
+                .map(|peer| {
+                    let key = from_hex_formatted(&peer.name).expect("Could not parse peer key");
+                    let key = PublicKey::decode(key.as_ref()).expect("Peer key is invalid");
+                    (key, peer.ip)
+                })
+                .collect();
+
+            let peer_keys = peers.keys().cloned().collect::<Vec<_>>();
+            let mut bootstrappers = Vec::new();
+            for bootstrapper in &config.bootstrappers {
+                let key =
+                    from_hex_formatted(bootstrapper).expect("Could not parse bootstrapper key");
+                let key = PublicKey::decode(key.as_ref()).expect("Bootstrapper key is invalid");
+                let ip = peers.get(&key).expect("Could not find bootstrapper in IPs");
+                let bootstrapper_socket = format!("{}:{}", ip, config.port);
+                let bootstrapper_socket = SocketAddr::from_str(&bootstrapper_socket)
+                    .expect("Could not parse bootstrapper socket");
+                bootstrappers.push((key, bootstrapper_socket));
+            }
+            let ip = peers.get(&public_key).expect("Could not find self in IPs");
+            (*ip, peer_keys, bootstrappers)
+        } else {
+            let peers_file = std::fs::read_to_string(peers_file.unwrap()).unwrap();
+            let peers: Peers =
+                serde_yaml::from_str(&peers_file).expect("Could not parse peers file");
+            let peers: HashMap<PublicKey, SocketAddr> = peers
+                .addresses
+                .into_iter()
+                .map(|peer| {
+                    let key = from_hex_formatted(&peer.0).expect("Could not parse peer key");
+                    let key = PublicKey::decode(key.as_ref()).expect("Peer key is invalid");
+                    (key, peer.1)
+                })
+                .collect();
+
+            let peer_keys = peers.keys().cloned().collect::<Vec<_>>();
+            let mut bootstrappers = Vec::new();
+            for bootstrapper in &config.bootstrappers {
+                let key =
+                    from_hex_formatted(bootstrapper).expect("Could not parse bootstrapper key");
+                let key = PublicKey::decode(key.as_ref()).expect("Bootstrapper key is invalid");
+                let socket = peers.get(&key).expect("Could not find bootstrapper in IPs");
+                bootstrappers.push((key, *socket));
+            }
+            let ip = peers
+                .get(&public_key)
+                .expect("Could not find self in IPs")
+                .ip();
+            (ip, peer_keys, bootstrappers)
+        };
+        info!(peers = peers.len(), "loaded peers");
+        let peers_u32 = peers.len() as u32;
+
+        // Parse config
+        let share = from_hex_formatted(&config.share).expect("Could not parse share");
+        let share = group::Share::decode(share.as_ref()).expect("Share is invalid");
+        let threshold = quorum(peers_u32);
+        let identity = from_hex_formatted(&config.identity).expect("Could not parse identity");
+        let identity = poly::Public::decode_cfg(identity.as_ref(), &(threshold as usize))
+            .expect("Identity is invalid");
+        let identity_public = *poly::public(&identity);
+        info!(
+            ?public_key,
+            ?identity_public,
+            ?ip,
+            port = config.port,
+            "loaded config"
+        );
+
+        // Configure network
+        let p2p_namespace = union_unique(NAMESPACE, b"_P2P");
+        let mut p2p_cfg = authenticated::Config::aggressive(
+            signer.clone(),
+            &p2p_namespace,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
+            SocketAddr::new(ip, config.port),
+            bootstrappers,
+            MAX_MESSAGE_SIZE,
+        );
+        p2p_cfg.mailbox_size = config.mailbox_size;
+
         // Start p2p
         let (mut network, mut oracle) =
             authenticated::Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
-        oracle.register(0, peer_keys.clone()).await;
+        oracle.register(0, peers.clone()).await;
 
         // Register voter channel
         let voter_limit = Quota::per_second(NonZeroU32::new(128).unwrap());
@@ -205,8 +234,9 @@ fn main() {
             signer,
             identity,
             share,
-            participants: peer_keys,
+            participants: peers,
             mailbox_size: config.mailbox_size,
+            deque_size: config.deque_size,
             backfill_quota: backfiller_limit,
             leader_timeout: LEADER_TIMEOUT,
             notarization_timeout: NOTARIZATION_TIMEOUT,
@@ -225,78 +255,8 @@ fn main() {
         // Start engine
         let engine = engine.start(voter, resolver, broadcaster, backfiller);
 
-        // Start system metrics collector
-        let system = context.with_label("system").spawn(|context| async move {
-            // Register metrics
-            let cpu_usage: Gauge<f64, AtomicU64> = Gauge::default();
-            context.register("cpu_usage", "CPU usage", cpu_usage.clone());
-            let memory_used: Gauge<i64, AtomicI64> = Gauge::default();
-            context.register("memory_used", "Memory used", memory_used.clone());
-            let memory_free: Gauge<i64, AtomicI64> = Gauge::default();
-            context.register("memory_free", "Memory free", memory_free.clone());
-            let swap_used: Gauge<i64, AtomicI64> = Gauge::default();
-            context.register("swap_used", "Swap used", swap_used.clone());
-            let swap_free: Gauge<i64, AtomicI64> = Gauge::default();
-            context.register("swap_free", "Swap free", swap_free.clone());
-            let disk_used: Gauge<i64, AtomicI64> = Gauge::default();
-            context.register("disk_used", "Disk used", disk_used.clone());
-            let disk_free: Gauge<i64, AtomicI64> = Gauge::default();
-            context.register("disk_free", "Disk free", disk_free.clone());
-
-            // Initialize system info
-            let mut sys = System::new_all();
-            let mut disks = Disks::new_with_refreshed_list();
-
-            // Check metrics every
-            loop {
-                // Refresh system info
-                sys.refresh_all();
-                disks.refresh(true);
-
-                // Update metrics
-                cpu_usage.set(sys.global_cpu_usage() as f64);
-                memory_used.set(sys.used_memory() as i64);
-                memory_free.set(sys.free_memory() as i64);
-                swap_used.set(sys.used_swap() as i64);
-                swap_free.set(sys.free_swap() as i64);
-
-                // Update disk metrics for root disk
-                for disk in disks.list() {
-                    if disk.mount_point() == std::path::Path::new("/") {
-                        let total = disk.total_space();
-                        let available = disk.available_space();
-                        let used = total.saturating_sub(available);
-                        disk_used.set(used as i64);
-                        disk_free.set(available as i64);
-                        break;
-                    }
-                }
-
-                // Wait to pull metrics again
-                context.sleep(SYSTEM_METRICS_REFRESH).await;
-            }
-        });
-
-        // Serve metrics
-        let metrics = context.with_label("metrics").spawn(|context| async move {
-            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), METRICS_PORT);
-            let listener = context
-                .bind(addr)
-                .await
-                .expect("Could not bind to metrics address");
-            let app = Router::new()
-                .route(
-                    "/metrics",
-                    get(|extension: Extension<tokio::Context>| async move { extension.0.encode() }),
-                )
-                .layer(Extension(context));
-            serve(listener, app.into_make_service())
-                .await
-                .expect("Could not serve metrics");
-        });
-
         // Wait for any task to error
-        if let Err(e) = try_join_all(vec![p2p, engine, system, metrics]).await {
+        if let Err(e) = try_join_all(vec![p2p, engine]).await {
             error!(?e, "task failed");
         }
     });

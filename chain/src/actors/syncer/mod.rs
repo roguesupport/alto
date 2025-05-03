@@ -2,8 +2,6 @@ use commonware_cryptography::{bls12381::primitives::group, ed25519::PublicKey};
 use governor::Quota;
 
 mod actor;
-mod archive;
-mod buffer;
 mod coordinator;
 pub mod handler;
 mod key;
