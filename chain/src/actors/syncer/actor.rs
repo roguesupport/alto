@@ -269,22 +269,32 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, I: Indexer> Actor<R,
                     0
                 };
 
-                // Index all finalized blocks
+                // Index all finalized blocks.
                 //
                 // If using state sync, this is not necessary.
                 loop {
                     // Check if the next block is available
                     let next = last_indexed + 1;
                     if let Some(block) = orchestor.get(next).await {
-                        // Update metadata
+                        // In an application that maintains state, you would compute the state transition function here.
+                        //
+                        // After an unclean shutdown (where the finalizer metadata is not synced after some height is processed by the application),
+                        // it is possible that the application may be asked to process a block it has already seen (which it can simply ignore).
+
+                        // Update finalizer metadata.
+                        //
+                        // If we updated the finalizer metadata before the application applied its state transition function, an unclean
+                        // shutdown could put the application in an unrecoverable state where the last indexed height (the height we
+                        // start processing at after restart) is ahead of the application's last processed height (requiring the application
+                        // to process a non-contiguous log). For the same reason, the application should sync any cached disk changes after processing
+                        // its state transition function to ensure that the application can continue processing from the the last synced indexed height
+                        // (on restart).
                         self.finalizer_metadata
                             .put(latest_key.clone(), next.to_be_bytes().to_vec());
                         self.finalizer_metadata
                             .sync()
                             .await
                             .expect("Failed to sync finalizer");
-
-                        // In an application that maintains state, you would compute the state transition function here.
 
                         // Update the latest indexed
                         self.contiguous_height.set(next as i64);
