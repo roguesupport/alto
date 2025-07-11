@@ -21,12 +21,12 @@ use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
 use commonware_resolver::{p2p, Resolver};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use commonware_storage::{
-    archive::{self, Archive, Identifier},
-    index::translator::{EightCap, TwoCap},
+    archive::{self, immutable, prunable, Archive as _, Identifier},
     metadata::{self, Metadata},
+    translator::TwoCap,
 };
-use commonware_utils::array::FixedBytes;
-use futures::{channel::mpsc, StreamExt};
+use commonware_utils::array::{FixedBytes, U64};
+use futures::{channel::mpsc, try_join, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
@@ -36,9 +36,14 @@ use std::{
 };
 use tracing::{debug, info, warn};
 
-const REPLAY_BUFFER: usize = 8 * 1024 * 1024;
-const REPLAY_CONCURRENCY: usize = 4;
-const WRITE_BUFFER: usize = 1024 * 1024;
+const PRUNABLE_ITEMS_PER_SECTION: u64 = 4_096;
+const IMMUTABLE_ITEMS_PER_SECTION: u64 = 262_144;
+const FREEZER_TABLE_RESIZE_FREQUENCY: u8 = 4;
+const FREEZER_TABLE_RESIZE_CHUNK_SIZE: u32 = 2u32.pow(16); // 3MB
+const FREEZER_JOURNAL_TARGET_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
+const FREEZER_JOURNAL_COMPRESSION: Option<u8> = Some(3);
+const REPLAY_BUFFER: usize = 8 * 1024 * 1024; // 8MB
+const WRITE_BUFFER: usize = 1024 * 1024; // 1MB
 
 /// Application actor.
 pub struct Actor<R: Rng + Spawner + Metrics + Clock + GClock + Storage, I: Indexer> {
@@ -53,19 +58,19 @@ pub struct Actor<R: Rng + Spawner + Metrics + Clock + GClock + Storage, I: Index
     indexer: Option<I>,
 
     // Blocks verified stored by view<>digest
-    verified: Archive<TwoCap, R, Digest, Block>,
+    verified: prunable::Archive<TwoCap, R, Digest, Block>,
     // Blocks notarized stored by view<>digest
-    notarized: Archive<TwoCap, R, Digest, Notarized>,
+    notarized: prunable::Archive<TwoCap, R, Digest, Notarized>,
 
     // Finalizations stored by height
-    finalized: Archive<EightCap, R, Digest, Finalization>,
+    finalized: immutable::Archive<R, Digest, Finalization>,
     // Blocks finalized stored by height
     //
     // We store this separately because we may not have the finalization for a block
-    blocks: Archive<EightCap, R, Digest, Block>,
+    blocks: immutable::Archive<R, Digest, Block>,
 
     // Finalizer storage
-    finalizer_metadata: Metadata<R, FixedBytes<1>>,
+    metadata: Metadata<R, FixedBytes<1>, U64>,
 
     // Latest height metric
     finalized_height: Gauge,
@@ -78,14 +83,12 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, I: Indexer> Actor<R,
     pub async fn init(context: R, config: Config<I>) -> (Self, Mailbox) {
         // Initialize verified blocks
         let start = Instant::now();
-        let verified_archive = Archive::init(
-            context.with_label("verified_archive"),
-            archive::Config {
-                partition: format!("{}-verifications", config.partition_prefix),
+        let verified = prunable::Archive::init(
+            context.with_label("verified"),
+            prunable::Config {
+                partition: format!("{}-verified", config.partition_prefix),
                 translator: TwoCap,
-                section_mask: 0xffff_ffff_ffff_f000u64,
-                pending_writes: 0,
-                replay_concurrency: REPLAY_CONCURRENCY,
+                items_per_section: PRUNABLE_ITEMS_PER_SECTION,
                 compression: None,
                 codec_config: (),
                 replay_buffer: REPLAY_BUFFER,
@@ -98,14 +101,12 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, I: Indexer> Actor<R,
 
         // Initialize notarized blocks
         let start = Instant::now();
-        let notarized_archive = Archive::init(
-            context.with_label("notarized_archive"),
-            archive::Config {
-                partition: format!("{}-notarizations", config.partition_prefix),
+        let notarized = prunable::Archive::init(
+            context.with_label("notarized"),
+            prunable::Config {
+                partition: format!("{}-notarized", config.partition_prefix),
                 translator: TwoCap,
-                section_mask: 0xffff_ffff_ffff_f000u64,
-                pending_writes: 0,
-                replay_concurrency: REPLAY_CONCURRENCY,
+                items_per_section: PRUNABLE_ITEMS_PER_SECTION,
                 compression: None,
                 codec_config: (),
                 replay_buffer: REPLAY_BUFFER,
@@ -118,15 +119,25 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, I: Indexer> Actor<R,
 
         // Initialize finalizations
         let start = Instant::now();
-        let finalized_archive = Archive::init(
-            context.with_label("finalized_archive"),
-            archive::Config {
-                partition: format!("{}-finalizations", config.partition_prefix),
-                translator: EightCap,
-                section_mask: 0xffff_ffff_fff0_0000u64,
-                pending_writes: 0,
-                replay_concurrency: REPLAY_CONCURRENCY,
-                compression: None,
+        let finalized = immutable::Archive::init(
+            context.with_label("finalized"),
+            immutable::Config {
+                metadata_partition: format!("{}-finalized-metadata", config.partition_prefix),
+                freezer_table_partition: format!(
+                    "{}-finalized-freezer-table",
+                    config.partition_prefix
+                ),
+                freezer_table_initial_size: config.finalized_freezer_table_initial_size,
+                freezer_table_resize_frequency: FREEZER_TABLE_RESIZE_FREQUENCY,
+                freezer_table_resize_chunk_size: FREEZER_TABLE_RESIZE_CHUNK_SIZE,
+                freezer_journal_partition: format!(
+                    "{}-finalized-freezer-journal",
+                    config.partition_prefix
+                ),
+                freezer_journal_target_size: FREEZER_JOURNAL_TARGET_SIZE,
+                freezer_journal_compression: FREEZER_JOURNAL_COMPRESSION,
+                ordinal_partition: format!("{}-finalized-ordinal", config.partition_prefix),
+                items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
                 codec_config: (),
                 replay_buffer: REPLAY_BUFFER,
                 write_buffer: WRITE_BUFFER,
@@ -138,15 +149,25 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, I: Indexer> Actor<R,
 
         // Initialize blocks
         let start = Instant::now();
-        let block_archive = Archive::init(
-            context.with_label("block_archive"),
-            archive::Config {
-                partition: format!("{}-blocks", config.partition_prefix),
-                translator: EightCap,
-                section_mask: 0xffff_ffff_fff0_0000u64,
-                pending_writes: 0,
-                replay_concurrency: REPLAY_CONCURRENCY,
-                compression: None,
+        let blocks = immutable::Archive::init(
+            context.with_label("blocks"),
+            immutable::Config {
+                metadata_partition: format!("{}-blocks-metadata", config.partition_prefix),
+                freezer_table_partition: format!(
+                    "{}-blocks-freezer-table",
+                    config.partition_prefix
+                ),
+                freezer_table_initial_size: config.blocks_freezer_table_initial_size,
+                freezer_table_resize_frequency: FREEZER_TABLE_RESIZE_FREQUENCY,
+                freezer_table_resize_chunk_size: FREEZER_TABLE_RESIZE_CHUNK_SIZE,
+                freezer_journal_partition: format!(
+                    "{}-blocks-freezer-journal",
+                    config.partition_prefix
+                ),
+                freezer_journal_target_size: FREEZER_JOURNAL_TARGET_SIZE,
+                freezer_journal_compression: FREEZER_JOURNAL_COMPRESSION,
+                ordinal_partition: format!("{}-blocks-ordinal", config.partition_prefix),
+                items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
                 codec_config: (),
                 replay_buffer: REPLAY_BUFFER,
                 write_buffer: WRITE_BUFFER,
@@ -157,14 +178,15 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, I: Indexer> Actor<R,
         info!(elapsed = ?start.elapsed(), "restored block archive");
 
         // Initialize finalizer metadata
-        let finalizer_metadata = Metadata::init(
-            context.with_label("finalizer_metadata"),
+        let metadata = Metadata::init(
+            context.with_label("metadata"),
             metadata::Config {
-                partition: format!("{}-finalizer_metadata", config.partition_prefix),
+                partition: format!("{}-metadata", config.partition_prefix),
+                codec_config: (),
             },
         )
         .await
-        .expect("Failed to initialize finalizer metadata");
+        .expect("Failed to initialize metadata");
 
         // Create metrics
         let finalized_height = Gauge::default();
@@ -194,13 +216,11 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, I: Indexer> Actor<R,
                 activity_timeout: config.activity_timeout,
                 indexer: config.indexer,
 
-                verified: verified_archive,
-                notarized: notarized_archive,
-
-                finalized: finalized_archive,
-                blocks: block_archive,
-
-                finalizer_metadata,
+                verified,
+                notarized,
+                finalized,
+                blocks,
+                metadata,
 
                 finalized_height,
                 contiguous_height,
@@ -262,8 +282,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, I: Indexer> Actor<R,
             .spawn(move |_| async move {
                 // Initialize last indexed from metadata store
                 let latest_key = FixedBytes::new([0u8]);
-                let mut last_indexed = if let Some(bytes) = self.finalizer_metadata.get(&latest_key)
-                {
+                let mut last_indexed = if let Some(bytes) = self.metadata.get(&latest_key) {
                     u64::from_be_bytes(bytes.to_vec().try_into().unwrap())
                 } else {
                     0
@@ -289,12 +308,10 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, I: Indexer> Actor<R,
                         // to process a non-contiguous log). For the same reason, the application should sync any cached disk changes after processing
                         // its state transition function to ensure that the application can continue processing from the the last synced indexed height
                         // (on restart).
-                        self.finalizer_metadata
-                            .put(latest_key.clone(), next.to_be_bytes().to_vec());
-                        self.finalizer_metadata
-                            .sync()
+                        self.metadata
+                            .put_sync(latest_key.clone(), next.into())
                             .await
-                            .expect("Failed to sync finalizer");
+                            .expect("Failed to update metadata");
 
                         // Update the latest indexed
                         self.contiguous_height.set(next as i64);
@@ -349,7 +366,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, I: Indexer> Actor<R,
                         }
                         Message::Verified { view, payload } => {
                             match self.verified
-                                .put(view, payload.digest(), payload)
+                                .put_sync(view, payload.digest(), payload)
                                 .await {
                                     Ok(_) => {
                                         debug!(view, "verified block stored");
@@ -415,7 +432,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, I: Indexer> Actor<R,
 
                                 // Persist the notarization
                                 match self.notarized
-                                    .put(view, digest, notarization)
+                                    .put_sync(view, digest, notarization)
                                     .await {
                                     Ok(_) => {
                                         debug!(view, height, "notarized block stored");
@@ -493,27 +510,19 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, I: Indexer> Actor<R,
                                     });
                                 }
 
-                                // Persist the finalization
-                                self.finalized
-                                    .put(height, proposal.payload, finalization)
-                                    .await
-                                    .expect("Failed to insert finalization");
-                                self.blocks
-                                    .put(height, digest, block)
-                                    .await
-                                    .expect("Failed to insert finalized block");
+                                // Persist the finalization and block
+                                let finalized = self.finalized
+                                    .put_sync(height, proposal.payload, finalization);
+                                let blocks = self.blocks
+                                    .put_sync(height, digest, block);
+                                try_join!(finalized, blocks).expect("Failed to persist finalization and block");
                                 debug!(view, height, "finalized block stored");
 
                                 // Prune blocks
                                 let min_view = last_view_processed.saturating_sub(self.activity_timeout);
-                                self.verified
-                                    .prune(min_view)
-                                    .await
-                                    .expect("Failed to prune verified block");
-                                self.notarized
-                                    .prune(min_view)
-                                    .await
-                                    .expect("Failed to prune notarized block");
+                                let verified = self.verified.prune(min_view);
+                                let notarized = self.notarized.prune(min_view);
+                                try_join!(verified, notarized).expect("Failed to prune verified and notarized blocks");
                                 debug!(min_view, "pruned verified and notarized archives");
 
                                 // Notify finalizer
@@ -619,7 +628,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, I: Indexer> Actor<R,
                                 let verified = self.verified.get(Identifier::Key(&target_block)).await.expect("Failed to get verified block");
                                 if let Some(verified) = verified {
                                     let height = verified.height;
-                                    self.blocks.put(height, target_block, verified).await.expect("Failed to insert finalized block");
+                                    self.blocks.put_sync(height, target_block, verified).await.expect("Failed to insert finalized block");
                                     debug!(height, "repaired block from verified");
                                     result.send(true).expect("Failed to send repair result");
                                     continue;
@@ -627,7 +636,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, I: Indexer> Actor<R,
                                 let notarization = self.notarized.get(Identifier::Key(&target_block)).await.expect("Failed to get notarized block");
                                 if let Some(notarization) = notarization {
                                     let height = notarization.block.height;
-                                    self.blocks.put(height, target_block, notarization.block).await.expect("Failed to insert finalized block");
+                                    self.blocks.put_sync(height, target_block, notarization.block).await.expect("Failed to insert finalized block");
                                     debug!(height, "repaired block from notarizations");
                                     result.send(true).expect("Failed to send repair result");
                                     continue;
@@ -744,7 +753,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, I: Indexer> Actor<R,
                                     // Persist the notarization
                                     let _ = response.send(true);
                                     match self.notarized
-                                        .put(view, notarization.block.digest(), notarization)
+                                        .put_sync(view, notarization.block.digest(), notarization)
                                         .await {
                                         Ok(_) => {
                                             debug!(view, "notarized stored");
@@ -779,17 +788,12 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, I: Indexer> Actor<R,
                                     debug!(height, "received finalization");
                                     let _ = response.send(true);
 
-                                    // Persist the finalization
-                                    self.finalized
-                                        .put(height, finalization.block.digest(), finalization.proof)
-                                        .await
-                                        .expect("Failed to insert finalization");
-
-                                    // Persist the block
-                                    self.blocks
-                                        .put(height, finalization.block.digest(), finalization.block)
-                                        .await
-                                        .expect("Failed to insert finalized block");
+                                    // Persist the finalization and block
+                                    let finalized = self.finalized
+                                        .put_sync(height, finalization.block.digest(), finalization.proof);
+                                    let blocks = self.blocks
+                                        .put_sync(height, finalization.block.digest(), finalization.block);
+                                    try_join!(finalized, blocks).expect("Failed to persist finalization and block");
 
                                     // Notify finalizer
                                     let _ = finalizer_sender.try_send(());
@@ -811,7 +815,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, I: Indexer> Actor<R,
                                     debug!(?digest, height = block.height, "received block");
                                     let _ = response.send(true);
                                     self.blocks
-                                        .put(block.height, digest, block)
+                                        .put_sync(block.height, digest, block)
                                         .await
                                         .expect("Failed to insert finalized block");
 

@@ -33,6 +33,8 @@ const WRITE_BUFFER: usize = 1024 * 1024;
 pub struct Config<B: Blocker<PublicKey = PublicKey>, I: Indexer> {
     pub blocker: B,
     pub partition_prefix: String,
+    pub blocks_freezer_table_initial_size: u32,
+    pub finalized_freezer_table_initial_size: u32,
     pub signer: PrivateKey,
     pub polynomial: Poly<Evaluation>,
     pub share: group::Share,
@@ -119,6 +121,8 @@ impl<
                 public_key: cfg.signer.public_key(),
                 identity,
                 participants: cfg.participants,
+                blocks_freezer_table_initial_size: cfg.blocks_freezer_table_initial_size,
+                finalized_freezer_table_initial_size: cfg.finalized_freezer_table_initial_size,
                 mailbox_size: cfg.mailbox_size,
                 backfill_quota: cfg.backfill_quota,
                 activity_timeout: cfg
@@ -142,7 +146,6 @@ impl<
                 partition: format!("{}-consensus", cfg.partition_prefix),
                 compression: None,
                 mailbox_size: cfg.mailbox_size,
-                replay_concurrency: 1,
                 leader_timeout: cfg.leader_timeout,
                 notarization_timeout: cfg.notarization_timeout,
                 nullify_retry: cfg.nullify_retry,

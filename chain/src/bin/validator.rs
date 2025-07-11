@@ -9,7 +9,7 @@ use commonware_cryptography::{
     Signer,
 };
 use commonware_deployer::ec2::Hosts;
-use commonware_p2p::authenticated;
+use commonware_p2p::authenticated::discovery as authenticated;
 use commonware_runtime::{tokio, Metrics, Runner};
 use commonware_utils::{from_hex_formatted, quorum, union_unique};
 use futures::future::try_join_all;
@@ -40,6 +40,8 @@ const FETCH_CONCURRENT: usize = 4;
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 const MAX_FETCH_COUNT: usize = 16;
 const MAX_FETCH_SIZE: usize = 512 * 1024;
+const BLOCKS_FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(21); // 100MB
+const FINALIZED_FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(21); // 100MB
 
 fn main() {
     // Parse arguments
@@ -192,26 +194,16 @@ fn main() {
 
         // Register pending channel
         let pending_limit = Quota::per_second(NonZeroU32::new(128).unwrap());
-        let pending =
-            network.register(PENDING_CHANNEL, pending_limit, config.message_backlog, None);
+        let pending = network.register(PENDING_CHANNEL, pending_limit, config.message_backlog);
 
         // Register recovered channel
         let recovered_limit = Quota::per_second(NonZeroU32::new(128).unwrap());
-        let recovered = network.register(
-            RECOVERED_CHANNEL,
-            recovered_limit,
-            config.message_backlog,
-            None,
-        );
+        let recovered =
+            network.register(RECOVERED_CHANNEL, recovered_limit, config.message_backlog);
 
         // Register resolver channel
         let resolver_limit = Quota::per_second(NonZeroU32::new(128).unwrap());
-        let resolver = network.register(
-            RESOLVER_CHANNEL,
-            resolver_limit,
-            config.message_backlog,
-            None,
-        );
+        let resolver = network.register(RESOLVER_CHANNEL, resolver_limit, config.message_backlog);
 
         // Register broadcast channel
         let broadcaster_limit = Quota::per_second(NonZeroU32::new(8).unwrap());
@@ -219,17 +211,12 @@ fn main() {
             BROADCASTER_CHANNEL,
             broadcaster_limit,
             config.message_backlog,
-            Some(3),
         );
 
         // Register backfill channel
         let backfiller_limit = Quota::per_second(NonZeroU32::new(8).unwrap());
-        let backfiller = network.register(
-            BACKFILLER_CHANNEL,
-            backfiller_limit,
-            config.message_backlog,
-            Some(3),
-        );
+        let backfiller =
+            network.register(BACKFILLER_CHANNEL, backfiller_limit, config.message_backlog);
 
         // Create network
         let p2p = network.start();
@@ -244,6 +231,8 @@ fn main() {
         let config = engine::Config {
             blocker: oracle,
             partition_prefix: "engine".to_string(),
+            blocks_freezer_table_initial_size: BLOCKS_FREEZER_TABLE_INITIAL_SIZE,
+            finalized_freezer_table_initial_size: FINALIZED_FREEZER_TABLE_INITIAL_SIZE,
             signer,
             polynomial,
             share,

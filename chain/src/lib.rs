@@ -115,6 +115,10 @@ mod tests {
     use std::{sync::atomic::AtomicBool, time::Duration};
     use tracing::info;
 
+    /// Limit the freezer table size to 1MB because the deterministic runtime stores
+    /// everything in RAM.
+    const FREEZER_TABLE_INITIAL_SIZE: u32 = 2u32.pow(14); // 1MB
+
     /// MockIndexer is a simple indexer implementation for testing.
     #[derive(Clone)]
     struct MockIndexer {
@@ -272,10 +276,12 @@ mod tests {
                 public_keys.insert(public_key.clone());
 
                 // Configure engine
-                let uid = format!("validator-{}", public_key);
+                let uid = format!("validator-{public_key}");
                 let config: Config<_, MockIndexer> = engine::Config {
                     blocker: oracle.control(public_key.clone()),
                     partition_prefix: uid.clone(),
+                    blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
+                    finalized_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
                     signer,
                     polynomial: polynomial.clone(),
                     share: shares[idx].clone(),
@@ -444,10 +450,12 @@ mod tests {
 
                 // Configure engine
                 let public_key = signer.public_key();
-                let uid = format!("validator-{}", public_key);
+                let uid = format!("validator-{public_key}");
                 let config: Config<_, MockIndexer> = engine::Config {
                     blocker: oracle.control(public_key.clone()),
                     partition_prefix: uid.clone(),
+                    blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
+                    finalized_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
                     signer: signer.clone(),
                     polynomial: polynomial.clone(),
                     share: shares[idx].clone(),
@@ -530,10 +538,12 @@ mod tests {
             let signer = signers[0].clone();
             let share = shares[0].clone();
             let public_key = signer.public_key();
-            let uid = format!("validator-{}", public_key);
+            let uid = format!("validator-{public_key}");
             let config: Config<_, MockIndexer> = engine::Config {
                 blocker: oracle.control(public_key.clone()),
                 partition_prefix: uid.clone(),
+                blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
+                finalized_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
                 signer: signer.clone(),
                 polynomial: polynomial.clone(),
                 share,
@@ -663,10 +673,12 @@ mod tests {
                     public_keys.insert(public_key.clone());
 
                     // Configure engine
-                    let uid = format!("validator-{}", public_key);
+                    let uid = format!("validator-{public_key}");
                     let config: Config<_, MockIndexer> = engine::Config {
                         blocker: oracle.control(public_key.clone()),
                         partition_prefix: uid.clone(),
+                        blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
+                        finalized_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
                         signer,
                         polynomial: polynomial.clone(),
                         share: shares[idx].clone(),
@@ -832,10 +844,12 @@ mod tests {
                 public_keys.insert(public_key.clone());
 
                 // Configure engine
-                let uid = format!("validator-{}", public_key);
+                let uid = format!("validator-{public_key}");
                 let config: Config<_, MockIndexer> = engine::Config {
                     blocker: oracle.control(public_key.clone()),
                     partition_prefix: uid.clone(),
+                    blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
+                    finalized_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
                     signer,
                     polynomial: polynomial.clone(),
                     share: shares[idx].clone(),
