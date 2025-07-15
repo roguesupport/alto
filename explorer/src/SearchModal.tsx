@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import './SearchModal.css';
-import { BACKEND_URL, PUBLIC_KEY_HEX } from './config';
+import { ClusterConfig } from './config';
 import { FinalizedJs, NotarizedJs, BlockJs, SearchType, SearchResult } from './types';
 import { hexToUint8Array, hexUint8Array, formatAge } from './utils';
 import init, { parse_seed, parse_notarized, parse_finalized, parse_block } from "./alto_types/alto_types.js";
@@ -8,6 +8,7 @@ import init, { parse_seed, parse_notarized, parse_finalized, parse_block } from 
 interface SearchModalProps {
     isOpen: boolean;
     onClose: () => void;
+    clusterConfig: ClusterConfig;
 }
 
 interface SearchResultWithLatency {
@@ -15,7 +16,7 @@ interface SearchResultWithLatency {
     latency: number;
 }
 
-const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose }) => {
+const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, clusterConfig }) => {
     const [searchType, setSearchType] = useState<SearchType>('finalization');
     const [searchQuery, setSearchQuery] = useState<string>('42645..42664');
     const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -139,6 +140,7 @@ const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose }) => {
             throw new Error("Search functionality is still initializing. Please try again in a moment.");
         }
 
+        const { BACKEND_URL, PUBLIC_KEY_HEX } = clusterConfig;
         const baseUrl = `https://${BACKEND_URL}`;
         const PUBLIC_KEY = hexToUint8Array(PUBLIC_KEY_HEX);
 

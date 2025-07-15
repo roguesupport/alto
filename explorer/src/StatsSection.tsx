@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { Cluster, ClusterConfig } from './config';
 
 // ViewData interface (no changes)
 export interface ViewData {
@@ -18,9 +19,68 @@ export interface ViewData {
 
 interface StatsSectionProps {
     views: ViewData[];
-    connectionError?: boolean;
-    connectionStatusKnown?: boolean;
+    selectedCluster: Cluster;
+    onClusterChange: (cluster: Cluster) => void;
+    configs: Record<Cluster, ClusterConfig>;
 }
+
+interface DropdownProps {
+    selectedCluster: Cluster;
+    onClusterChange: (cluster: Cluster) => void;
+    configs: Record<Cluster, ClusterConfig>;
+}
+
+const Dropdown: React.FC<DropdownProps> = ({ selectedCluster, onClusterChange, configs }) => {
+    const [isOpen, setIsOpen] = useState(false);
+    const dropdownRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+            if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+                setIsOpen(false);
+            }
+        };
+
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => {
+            document.removeEventListener('mousedown', handleClickOutside);
+        };
+    }, []);
+
+    const handleSelect = (cluster: Cluster) => {
+        onClusterChange(cluster);
+        setIsOpen(false);
+    };
+
+    return (
+        <div className="custom-dropdown" ref={dropdownRef}>
+            <button
+                className={`dropdown-trigger ${selectedCluster === 'global' ? 'global-cluster' : 'usa-cluster'}`}
+                onClick={() => setIsOpen(!isOpen)}
+                aria-expanded={isOpen}
+                aria-haspopup="listbox"
+            >
+                <span className="dropdown-label">{configs[selectedCluster].name}</span>
+                <span className="dropdown-arrow">{isOpen ? '▲' : '▼'}</span>
+            </button>
+
+            {isOpen && (
+                <div className="dropdown-menu">
+                    {Object.entries(configs).map(([clusterId, config]) => (
+                        <button
+                            key={clusterId}
+                            className={`dropdown-option ${selectedCluster === clusterId ? 'selected' : ''} ${clusterId === 'global' ? 'global-option' : 'usa-option'}`}
+                            onClick={() => handleSelect(clusterId as Cluster)}
+                        >
+                            <div className="option-name">{config.name}</div>
+                            <div className="option-description" dangerouslySetInnerHTML={{ __html: config.description }} />
+                        </button>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+};
 
 interface TooltipProps {
     content: string;
@@ -92,7 +152,7 @@ const Tooltip: React.FC<TooltipProps> = ({ content, children }) => {
     );
 };
 
-const StatsSection: React.FC<StatsSectionProps> = ({ views, connectionError = false, connectionStatusKnown = false }) => {
+const StatsSection: React.FC<StatsSectionProps> = ({ views, selectedCluster, onClusterChange, configs }) => {
     // Calculation logic (unchanged from original)
     const notarizationTimes = views
         .filter(view => (view.status === "notarized" || view.status === "finalized"))
@@ -214,12 +274,13 @@ const StatsSection: React.FC<StatsSectionProps> = ({ views, connectionError = fa
         <div className="stats-card">
             <div className="stats-header">
                 <h2 className="stats-title">Latency</h2>
-                {connectionStatusKnown && (
-                    <div className={`connection-status-badge ${connectionError ? 'error' : 'success'}`}>
-                        <span className={`connection-status-dot ${connectionError ? 'error' : 'success'}`}></span>
-                        {connectionError ? 'DISCONNECTED' : 'CONNECTED'}
-                    </div>
-                )}
+                <div className="cluster-toggle">
+                    <Dropdown
+                        selectedCluster={selectedCluster}
+                        onClusterChange={onClusterChange}
+                        configs={configs}
+                    />
+                </div>
             </div>
 
             <div className="stats-grid">
@@ -238,23 +299,23 @@ const StatsSection: React.FC<StatsSectionProps> = ({ views, connectionError = fa
                 <div className="stat-box browser-metrics">
                     <div className="source-label">BROWSER</div>
                     <div className="browser-metrics-container">
-                        <Tooltip content={tooltips.timeToLock}>
-                            <div className="metric-container">
+                        <div className="metric-container">
+                            <Tooltip content={tooltips.timeToLock}>
                                 <div className="stat-label">Locked</div>
                                 <div className="stat-value">
                                     {medianTimeToLock > 0 ? `${medianTimeToLock}ms` : "N/A"}
                                 </div>
-                            </div>
-                        </Tooltip>
+                            </Tooltip>
+                        </div>
 
-                        <Tooltip content={tooltips.timeToFinalize}>
-                            <div className="metric-container">
+                        <div className="metric-container">
+                            <Tooltip content={tooltips.timeToFinalize}>
                                 <div className="stat-label">Finalized</div>
                                 <div className="stat-value">
                                     {medianTimeToFinalize > 0 ? `${medianTimeToFinalize}ms` : "N/A"}
                                 </div>
-                            </div>
-                        </Tooltip>
+                            </Tooltip>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -263,7 +324,7 @@ const StatsSection: React.FC<StatsSectionProps> = ({ views, connectionError = fa
                 All latency measurements made by your browser are only performed after verifying the integrity of incoming artifacts with the network key.
                 Local clock skew is automatically detected and corrected.
             </div>
-        </div>
+        </div >
     );
 };
 

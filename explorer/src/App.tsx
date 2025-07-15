@@ -1,9 +1,9 @@
-import React, { useEffect, useState, useRef, useCallback } from "react";
+import React, { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
-import { LatLng, DivIcon } from "leaflet";
+import { DivIcon, LatLng } from "leaflet";
 import "leaflet/dist/leaflet.css";
 import init, { parse_seed, parse_notarized, parse_finalized, leader_index } from "./alto_types/alto_types.js";
-import { BACKEND_URL, LOCATIONS, PUBLIC_KEY_HEX } from "./config";
+import { getClusterConfig, getClusters, Cluster } from "./config";
 import { SeedJs, NotarizedJs, FinalizedJs, ViewData } from "./types";
 import { hexToUint8Array, hexUint8Array } from "./utils";
 import "./App.css";
@@ -21,21 +21,19 @@ import MaintenancePage from './MaintenancePage';
 import SearchModal from './SearchModal';
 import './SearchModal.css';
 
-// Export PUBLIC_KEY as a Uint8Array for use in the application
-const PUBLIC_KEY = hexToUint8Array(PUBLIC_KEY_HEX);
-
-const SCALE_DURATION = 750; // 750ms
+const SCALE_DURATION = 500; // 500ms
 const TIMEOUT_DURATION = 5000; // 5s
 const HEALTH_CHECK_INTERVAL = 60000; // Check health every minute
 
+const center = new LatLng(0, 0);
 const markerIcon = new DivIcon({
   className: "custom-div-icon",
   html: `<div style="
-      background-color: #0000eeff;
-      width: 16px;
-      height: 16px;
-      border-radius: 50%;
-    "></div>`,
+        background-color: #0000eeff;
+        width: 16px;
+        height: 16px;
+        border-radius: 50%;
+        "></div>`,
   iconSize: [12, 12],
   iconAnchor: [6, 6],
 });
@@ -73,13 +71,18 @@ const initializeLogoAnimations = () => {
 };
 
 const App: React.FC = () => {
+  const [selectedCluster, setSelectedCluster] = useState<Cluster>('global');
+  const clusterConfig = useMemo(() => getClusterConfig(selectedCluster), [selectedCluster]);
+  const allConfigs = useMemo(() => getClusters(), []);
+  const { BACKEND_URL, PUBLIC_KEY_HEX, LOCATIONS } = clusterConfig;
+  const PUBLIC_KEY = useMemo(() => hexToUint8Array(PUBLIC_KEY_HEX), [PUBLIC_KEY_HEX]);
+
   const [views, setViews] = useState<ViewData[]>([]);
   const [lastObservedView, setLastObservedView] = useState<number | null>(null);
   const [isAboutModalOpen, setIsAboutModalOpen] = useState<boolean>(false);
   const [isKeyInfoModalOpen, setIsKeyInfoModalOpen] = useState<boolean>(false);
   const [isMobile, setIsMobile] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string>("");
-  const [connectionStatusKnown, setConnectionStatusKnown] = useState<boolean>(false);
   const [showError, setShowError] = useState<boolean>(false);
   const [isInMaintenance, setIsInMaintenance] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -95,6 +98,31 @@ const App: React.FC = () => {
   const handleFinalizedRef = useRef<typeof handleFinalization>(null!);
   const isInitializedRef = useRef(false);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+
+  const handleClusterChange = (cluster: Cluster) => {
+    if (cluster !== selectedCluster) {
+      console.log(`Switching to ${cluster} cluster`);
+
+      // When switching, we close the old socket. The `onclose` handler for that socket
+      // should not trigger a reconnect or error message.
+      isInitializedRef.current = false;
+      if (wsRef.current) {
+        // Temporarily disable the onclose handler to prevent side-effects.
+        wsRef.current.onclose = null;
+        wsRef.current.close();
+      }
+      setSelectedCluster(cluster);
+    }
+  };
+
+  // Reset state when the cluster changes
+  useEffect(() => {
+    setViews([]);
+    setLastObservedView(null);
+    setErrorMessage("");
+    setShowError(false);
+  }, [selectedCluster]);
 
   // Health check function
   const checkHealth = useCallback(async () => {
@@ -125,7 +153,7 @@ const App: React.FC = () => {
       // Mark loading as complete regardless of result
       setIsLoading(false);
     }
-  }, []);
+  }, [BACKEND_URL]);
 
   // Run health check on initial load and periodically
   useEffect(() => {
@@ -309,7 +337,7 @@ const App: React.FC = () => {
 
       return newViews;
     });
-  }, [lastObservedView, adjustTime]);
+  }, [lastObservedView, adjustTime, LOCATIONS]);
 
   const handleNotarization = useCallback((notarized: NotarizedJs) => {
     const view = notarized.proof.view;
@@ -565,10 +593,9 @@ const App: React.FC = () => {
       ws.binaryType = "arraybuffer";
 
       ws.onopen = () => {
-        console.log("WebSocket connected");
+        console.log(`WebSocket connected: ${BACKEND_URL}`);
         setErrorMessage("");
         setShowError(false);
-        setConnectionStatusKnown(true);
       };
 
       ws.onmessage = (event) => {
@@ -603,7 +630,7 @@ const App: React.FC = () => {
           // If connection closed very quickly, likely rate-limited
           const timeSinceStarted = Date.now() - wsCreationTime;
           if (timeSinceStarted < 1000) {
-            setErrorMessage("Too many connection attempts from your IP. Try connecting again in an hour.");
+            setErrorMessage("Too many connection attempts from your IP. Try connecting again in a few minutes.");
             setShowError(true);
 
             // Clear reference to prevent reconnection
@@ -613,7 +640,6 @@ const App: React.FC = () => {
             setShowError(true);
           }
         }
-        setConnectionStatusKnown(true);
 
         // Only attempt to reconnect if we still have a reference to this websocket (and we didn't detect a rate limit error)
         if (wsRef.current === ws) {
@@ -651,7 +677,7 @@ const App: React.FC = () => {
         }
       }
     };
-  }, [isLoading, isInMaintenance]);
+  }, [isLoading, isInMaintenance, BACKEND_URL, PUBLIC_KEY]);
 
   // Loading state - show nothing until we get the result of the health check
   if (isLoading) {
@@ -662,9 +688,6 @@ const App: React.FC = () => {
   if (isInMaintenance) {
     return <MaintenancePage />;
   }
-
-  // Define center using LatLng
-  const center = new LatLng(0, 0);
 
   return (
     <div className="app-container">
@@ -728,10 +751,10 @@ const App: React.FC = () => {
             ⚷︎
           </button>
           <button
-            className="about-header-button"
+            className={`about-header-button ${selectedCluster === 'usa' ? 'usa-cluster' : ''}`}
             onClick={() => setIsAboutModalOpen(true)}
           >
-            ?︎
+            🌐
           </button>
         </div>
       </header>
@@ -739,7 +762,7 @@ const App: React.FC = () => {
       <main className="app-main">
         {/* Map */}
         <div className="map-container">
-          <MapContainer center={center} zoom={1} style={{ height: "100%", width: "100%" }} zoomControl={false} scrollWheelZoom={false} doubleClickZoom={false} touchZoom={false} dragging={false}>
+          <MapContainer key={selectedCluster} center={center} zoom={1} style={{ height: "100%", width: "100%" }} zoomControl={false} scrollWheelZoom={false} doubleClickZoom={false} touchZoom={false} dragging={false}>
             <TileLayer
               url="https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png"
               attribution='&copy; OSM | &copy; CARTO</a>'
@@ -772,8 +795,9 @@ const App: React.FC = () => {
         {/* Stats Section */}
         <StatsSection
           views={views}
-          connectionError={errorMessage.length > 0}
-          connectionStatusKnown={connectionStatusKnown}
+          selectedCluster={selectedCluster}
+          onClusterChange={handleClusterChange}
+          configs={allConfigs}
         />
 
         {/* Bars with integrated legend */}
@@ -781,9 +805,9 @@ const App: React.FC = () => {
           <div className="bars-header">
             <h2 className="bars-title">Timeline</h2>
             <div className="legend-container">
-              <LegendItem color="#0000eeff" label="Seeded" />
-              <LegendItem color="#000" label="Locked" />
-              <LegendItem color="#228B22ff" label="Finalized" />
+              <LegendItem color={"#0000eeff"} label="Seeded" />
+              <LegendItem color={"#000"} label="Locked" />
+              <LegendItem color={"#228B22ff"} label="Finalized" />
             </div>
           </div>
 
@@ -809,15 +833,19 @@ const App: React.FC = () => {
         &copy; {new Date().getFullYear()} Commonware, Inc. All rights reserved.
       </footer>
 
-      <AboutModal isOpen={isAboutModalOpen} onClose={() => setIsAboutModalOpen(false)} />
+      <AboutModal
+        isOpen={isAboutModalOpen}
+        onClose={() => setIsAboutModalOpen(false)}
+      />
       <KeyInfoModal
         isOpen={isKeyInfoModalOpen}
         onClose={() => setIsKeyInfoModalOpen(false)}
-        publicKeyHex={PUBLIC_KEY_HEX}
+        publicKeyHex={clusterConfig.PUBLIC_KEY_HEX}
       />
       <SearchModal
         isOpen={isSearchModalOpen}
         onClose={() => setIsSearchModalOpen(false)}
+        clusterConfig={clusterConfig}
       />
     </div >
   );

@@ -35,7 +35,7 @@ const AboutModal: React.FC<AboutModalProps> = ({ isOpen, onClose }) => {
                             deployed on a cluster of globally distributed nodes.
                         </p>
                         <p>
-                            <i>You can replicate this devnet in your own AWS account with <a href="https://docs.rs/commonware-deployer/0.0.41/commonware_deployer/">deployer::ec2</a> by following the
+                            <i>You can replicate this devnet in your own AWS account with <a href="https://docs.rs/commonware-deployer/latest/commonware_deployer/">deployer::ec2</a> by following the
                                 instructions <a href="https://github.com/commonwarexyz/alto/blob/main/chain/README.md">here</a>.</i>
                         </p>
                     </section>
@@ -100,6 +100,28 @@ const AboutModal: React.FC<AboutModalProps> = ({ isOpen, onClose }) => {
                             You can read more about the design of <i>threshold-simplex</i> <a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/threshold_simplex/index.html">here</a>.
                         </p>
                     </section>
+
+                    <section>
+                        <h3>Where is the data coming from?</h3>
+                        <p>
+                            We deployed alto to a cluster of <strong>50 validators</strong> running c7g.large (2 vCPU, 4GB RAM) nodes on AWS in two separate clusters:
+                        </p>
+                        <ul>
+                            <li><strong>Global Cluster</strong>: 10 regions (us-west-1, us-east-1, eu-west-1, ap-northeast-1, eu-north-1, ap-south-1, sa-east-1, eu-central-1, ap-northeast-2, ap-southeast-2).</li>
+                            <li><strong>USA Cluster</strong>: 4 regions (us-east-1, us-west-1, us-east-2, us-west-2).</li>
+                        </ul>
+                        <p>
+                            When you visit this page, however, you don't connect to any of those nodes. You connect to custom-built infrastructure (<a href="https://exoware.xyz">exoware::relay</a>) that streams consensus
+                            artifacts to your browser in real time.
+                        </p>
+                        <p>
+                            Because each consensus artifact is accompanied by a threshold signature, your browser can (and does) verify each inbound message using <a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/index.html">cryptography::bls12381</a> compiled to WASM.
+                        </p>
+                        <p>
+                            That's right, your browser is verifying every message it receives was emitted from consensus in real time. Don't trust an API, trust the open source verifier code running on your computer.
+                        </p>
+                    </section>
+
                     <section>
                         <h3>Why is it so fast?</h3>
                         <p>
@@ -116,22 +138,7 @@ const AboutModal: React.FC<AboutModalProps> = ({ isOpen, onClose }) => {
                             English? <i>threshold-simplex</i> moves at <strong>network speed</strong> (and it turns out that's pretty fast in 2025).
                         </p>
                     </section>
-                    <section>
-                        <h3>Where is the data coming from?</h3>
-                        <p>
-                            We deployed alto to a cluster of <strong>50 validators</strong> running c7g.large (2 vCPU, 4GB RAM) nodes on AWS in <strong>10 regions</strong> (us-west-1, us-east-1, eu-west-1, ap-northeast-1, eu-north-1, ap-south-1, sa-east-1, eu-central-1, ap-northeast-2, ap-southeast-2).
-                        </p>
-                        <p>
-                            When you visit this page, however, you don't connect to any of those nodes. You connect to custom-built infrastructure (<a href="https://exoware.xyz">exoware::relay</a>) that streams consensus
-                            artifacts to your browser in real time.
-                        </p>
-                        <p>
-                            Because each consensus artifact is accompanied by a threshold signature, your browser can (and does) verify each inbound message using <a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/index.html">cryptography::bls12381</a> compiled to WASM.
-                        </p>
-                        <p>
-                            That's right, your browser is verifying every message it receives was emitted from consensus in real time. Don't trust an API, trust the open source verifier code running on your computer.
-                        </p>
-                    </section>
+
                     <section>
                         <h3>Can I replay the stream?</h3>
                         <p>
@@ -139,20 +146,22 @@ const AboutModal: React.FC<AboutModalProps> = ({ isOpen, onClose }) => {
                         </p>
                         <p>
                             To download the tool, run:
-                            <pre className="code-block">
-                                <code>
-                                    cargo install alto-inspector
-                                </code>
-                            </pre>
-
-                            And then, to fetch block 10, run:
-                            <pre className="code-block">
-                                <code>
-                                    inspector get block 10
-                                </code>
-                            </pre>
                         </p>
+                        <pre className="code-block">
+                            <code>
+                                cargo install alto-inspector
+                            </code>
+                        </pre>
+                        <p>
+                            And then, to fetch block 10, run:
+                        </p>
+                        <pre className="code-block">
+                            <code>
+                                inspector get block 10
+                            </code>
+                        </pre>
                     </section>
+
                     <section>
                         <h3>Support</h3>
                         <p>If you run into any issues or have any other questions, <a href="https://github.com/commonwarexyz/alto/issues">open an issue!</a></p>
@@ -161,7 +170,7 @@ const AboutModal: React.FC<AboutModalProps> = ({ isOpen, onClose }) => {
                 <div className="about-modal-footer">
                     <button className="about-button" onClick={onClose}>Close</button>
                 </div>
-            </div>
+            </div >
         </div >
     );
 };

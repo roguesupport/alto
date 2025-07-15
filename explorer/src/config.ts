@@ -1,54 +1,33 @@
-export const BACKEND_URL = "global.alto.exoware.xyz";
-export const PUBLIC_KEY_HEX = "aae6f6aeeb4f04889760a7feaa1b67fb027f414446cee95b5245bbffd46688199eb839cf07987761c64081068d993b470c50e56d0a6913715015dc235f0009b9ec7a90bd640a9052025b8666761325e2d83e065be56f46057bea62174417c52c";
-export const LOCATIONS: [[number, number], string][] = [
-    [[37.7749, -122.4194], "San Francisco"],
-    [[38.8339, -77.3074], "Ashburn"],
-    [[53.3498, -6.2603], "Dublin"],
-    [[35.6895, 139.6917], "Tokyo"],
-    [[59.3293, 18.0686], "Stockholm"],
-    [[19.076, 72.8777], "Mumbai"],
-    [[-23.5505, -46.6333], "Sao Paulo"],
-    [[50.1109, 8.6821], "Frankfurt"],
-    [[37.5665, 126.978], "Seoul"],
-    [[-33.8688, 151.2093], "Sydney"],
-    [[37.7749, -122.4194], "San Francisco"],
-    [[38.8339, -77.3074], "Ashburn"],
-    [[53.3498, -6.2603], "Dublin"],
-    [[35.6895, 139.6917], "Tokyo"],
-    [[59.3293, 18.0686], "Stockholm"],
-    [[19.076, 72.8777], "Mumbai"],
-    [[-23.5505, -46.6333], "Sao Paulo"],
-    [[50.1109, 8.6821], "Frankfurt"],
-    [[37.5665, 126.978], "Seoul"],
-    [[-33.8688, 151.2093], "Sydney"],
-    [[37.7749, -122.4194], "San Francisco"],
-    [[38.8339, -77.3074], "Ashburn"],
-    [[53.3498, -6.2603], "Dublin"],
-    [[35.6895, 139.6917], "Tokyo"],
-    [[59.3293, 18.0686], "Stockholm"],
-    [[19.076, 72.8777], "Mumbai"],
-    [[-23.5505, -46.6333], "Sao Paulo"],
-    [[50.1109, 8.6821], "Frankfurt"],
-    [[37.5665, 126.978], "Seoul"],
-    [[-33.8688, 151.2093], "Sydney"],
-    [[37.7749, -122.4194], "San Francisco"],
-    [[38.8339, -77.3074], "Ashburn"],
-    [[53.3498, -6.2603], "Dublin"],
-    [[35.6895, 139.6917], "Tokyo"],
-    [[59.3293, 18.0686], "Stockholm"],
-    [[19.076, 72.8777], "Mumbai"],
-    [[-23.5505, -46.6333], "Sao Paulo"],
-    [[50.1109, 8.6821], "Frankfurt"],
-    [[37.5665, 126.978], "Seoul"],
-    [[-33.8688, 151.2093], "Sydney"],
-    [[37.7749, -122.4194], "San Francisco"],
-    [[38.8339, -77.3074], "Ashburn"],
-    [[53.3498, -6.2603], "Dublin"],
-    [[35.6895, 139.6917], "Tokyo"],
-    [[59.3293, 18.0686], "Stockholm"],
-    [[19.076, 72.8777], "Mumbai"],
-    [[-23.5505, -46.6333], "Sao Paulo"],
-    [[50.1109, 8.6821], "Frankfurt"],
-    [[37.5665, 126.978], "Seoul"],
-    [[-33.8688, 151.2093], "Sydney"]
-];
+import * as globalConfig from './global_config';
+import * as usaConfig from './usa_config';
+
+export type Cluster = 'global' | 'usa';
+
+export interface ClusterConfig {
+    BACKEND_URL: string;
+    PUBLIC_KEY_HEX: string;
+    LOCATIONS: [[number, number], string][];
+    name: string;
+    description: string;
+}
+
+const configs: Record<Cluster, ClusterConfig> = {
+    global: {
+        ...globalConfig,
+        name: 'Global Cluster',
+        description: `A cluster of <strong>50 validators</strong> running c7g.large (2 vCPU, 4GB RAM) nodes on AWS in <strong>10 regions</strong> (us-west-1, us-east-1, eu-west-1, ap-northeast-1, eu-north-1, ap-south-1, sa-east-1, eu-central-1, ap-northeast-2, ap-southeast-2).`,
+    },
+    usa: {
+        ...usaConfig,
+        name: 'USA Cluster',
+        description: `A cluster of <strong>50 validators</strong> running c7g.large (2 vCPU, 4GB RAM) nodes on AWS in <strong>4 regions</strong> (us-east-1, us-west-1, us-east-2, us-west-2).`,
+    }
+};
+
+export const getClusterConfig = (cluster: Cluster): ClusterConfig => {
+    return configs[cluster];
+};
+
+export const getClusters = (): Record<Cluster, ClusterConfig> => {
+    return configs;
+};
