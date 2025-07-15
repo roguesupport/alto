@@ -19,11 +19,14 @@
     display: flex;
     align-items: center;
     gap: 12px;
+    flex-shrink: 1;
+    min-width: 0;
 }
 
 .cluster-toggle {
     display: flex;
     align-items: center;
+    flex-shrink: 0;
 }
 
 /* Custom Dropdown Styles */
@@ -59,15 +62,32 @@
     color: black;
 }
 
-/* USA Cluster - Red theme */
+/* Smooth waving animation for patriotic gradient */
+@keyframes smoothWave {
+    0% {
+        background-position: 0% 50%;
+    }
+
+    50% {
+        background-position: 100% 50%;
+    }
+
+    100% {
+        background-position: 0% 50%;
+    }
+}
+
+/* USA Cluster - Patriotic theme */
 .dropdown-trigger.usa-cluster {
-    background: #dc143c;
-    border: 1px solid #dc143c;
+    background: linear-gradient(45deg, #B22234, #3C3B6E, #B22234);
+    background-size: 300% 300%;
+    border: 1px solid #B22234;
     color: white;
+    animation: smoothWave 4s ease-in-out infinite;
 }
 
 .dropdown-trigger.usa-cluster:hover {
-    background-color: #f0f0f0;
+    background: #f0f0f0;
     color: #dc143c;
 }
 
@@ -270,7 +290,7 @@
     }
 
     .dropdown-trigger {
-        min-width: 140px;
+        min-width: 150px;
         padding: 6px 12px;
     }
 
@@ -329,6 +349,11 @@
 }
 
 @media (max-width: 480px) {
+    .stats-header {
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
     .source-label {
         font-size: 10px;
     }
@@ -342,7 +367,7 @@
 
     .dropdown-trigger {
         font-size: 10px;
-        min-width: 120px;
+        min-width: 130px;
         padding: 4px 8px;
     }
 

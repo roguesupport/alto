@@ -21,6 +21,21 @@ import MaintenancePage from './MaintenancePage';
 import SearchModal from './SearchModal';
 import './SearchModal.css';
 
+const getInitialCluster = (): Cluster => {
+  // Get the cluster from the URL
+  const params = new URLSearchParams(window.location.search);
+  const clusterFromUrl = params.get('cluster');
+  const allClusters = getClusters();
+
+  // If the cluster exists, use it
+  if (clusterFromUrl && (clusterFromUrl in allClusters)) {
+    return clusterFromUrl as Cluster;
+  }
+
+  // Otherwise, use the global cluster
+  return 'global';
+};
+
 const SCALE_DURATION = 500; // 500ms
 const TIMEOUT_DURATION = 5000; // 5s
 const HEALTH_CHECK_INTERVAL = 60000; // Check health every minute
@@ -71,7 +86,7 @@ const initializeLogoAnimations = () => {
 };
 
 const App: React.FC = () => {
-  const [selectedCluster, setSelectedCluster] = useState<Cluster>('global');
+  const [selectedCluster, setSelectedCluster] = useState<Cluster>(getInitialCluster());
   const clusterConfig = useMemo(() => getClusterConfig(selectedCluster), [selectedCluster]);
   const allConfigs = useMemo(() => getClusters(), []);
   const { BACKEND_URL, PUBLIC_KEY_HEX, LOCATIONS } = clusterConfig;
@@ -99,22 +114,49 @@ const App: React.FC = () => {
   const isInitializedRef = useRef(false);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
+  const performClusterSwitch = useCallback((cluster: Cluster) => {
+    console.log(`Switching to ${cluster} cluster`);
+
+    // When switching, we close the old socket. The `onclose` handler for that socket
+    // should not trigger a reconnect or error message.
+    isInitializedRef.current = false;
+    if (wsRef.current) {
+      // Temporarily disable the onclose handler to prevent side-effects.
+      wsRef.current.onclose = null;
+      wsRef.current.close();
+    }
+
+    // Update the selected cluster
+    setSelectedCluster(cluster);
+  }, []);
+
 
   const handleClusterChange = (cluster: Cluster) => {
     if (cluster !== selectedCluster) {
-      console.log(`Switching to ${cluster} cluster`);
+      // Update URL and push to history
+      const url = new URL(window.location.href);
+      url.searchParams.set('cluster', cluster);
+      window.history.pushState({ cluster }, '', url.toString());
 
-      // When switching, we close the old socket. The `onclose` handler for that socket
-      // should not trigger a reconnect or error message.
-      isInitializedRef.current = false;
-      if (wsRef.current) {
-        // Temporarily disable the onclose handler to prevent side-effects.
-        wsRef.current.onclose = null;
-        wsRef.current.close();
-      }
-      setSelectedCluster(cluster);
+      // Perform the cluster switch
+      performClusterSwitch(cluster);
     }
   };
+
+  // Effect to handle browser navigation (back/forward)
+  useEffect(() => {
+    const handlePopState = () => {
+      const newCluster = getInitialCluster();
+      if (newCluster !== selectedCluster) {
+        performClusterSwitch(newCluster);
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, [selectedCluster, performClusterSwitch]);
 
   // Reset state when the cluster changes
   useEffect(() => {
