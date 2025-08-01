@@ -1,50 +1,22 @@
 use super::{
     ingress::{Mailbox, Message},
-    supervisor::Supervisor,
     Config,
 };
-use crate::actors::syncer;
+use crate::{supervisor::Supervisor, utils::OneshotClosedFut};
 use alto_types::Block;
-use commonware_consensus::threshold_simplex::types::View;
-use commonware_cryptography::{Digestible, Hasher, Sha256};
+use commonware_consensus::{marshal, threshold_simplex::types::View};
+use commonware_cryptography::{
+    bls12381::primitives::variant::MinSig, Committable, Digestible, Hasher, Sha256,
+};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use commonware_utils::SystemTimeExt;
 use futures::StreamExt;
 use futures::{channel::mpsc, future::try_join};
-use futures::{channel::oneshot, future};
-use futures::{
-    future::Either,
-    task::{Context, Poll},
-};
+use futures::{future, future::Either};
 use rand::Rng;
-use std::{
-    pin::Pin,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
-
-// Define a future that checks if the oneshot channel is closed using a mutable reference
-struct ChannelClosedFuture<'a, T> {
-    sender: &'a mut oneshot::Sender<T>,
-}
-
-impl<T> futures::Future for ChannelClosedFuture<'_, T> {
-    type Output = ();
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Use poll_canceled to check if the receiver has dropped the channel
-        match self.sender.poll_canceled(cx) {
-            Poll::Ready(()) => Poll::Ready(()), // Receiver dropped, channel closed
-            Poll::Pending => Poll::Pending,     // Channel still open
-        }
-    }
-}
-
-// Helper function to create the future using a mutable reference
-fn oneshot_closed_future<T>(sender: &mut oneshot::Sender<T>) -> ChannelClosedFuture<T> {
-    ChannelClosedFuture { sender }
-}
 
 /// Genesis message to use during initialization.
 const GENESIS: &[u8] = b"commonware is neat";
@@ -74,12 +46,12 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
         )
     }
 
-    pub fn start(mut self, syncer: syncer::Mailbox) -> Handle<()> {
-        self.context.spawn_ref()(self.run(syncer))
+    pub fn start(mut self, marshal: marshal::Mailbox<MinSig, Block>) -> Handle<()> {
+        self.context.spawn_ref()(self.run(marshal))
     }
 
     /// Run the application actor.
-    async fn run(mut self, mut syncer: syncer::Mailbox) {
+    async fn run(mut self, mut marshal: marshal::Mailbox<MinSig, Block>) {
         // Compute genesis digest
         self.hasher.update(GENESIS);
         let genesis_parent = self.hasher.finalize();
@@ -103,7 +75,7 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
                     let parent_request = if parent.1 == genesis_digest {
                         Either::Left(future::ready(Ok(genesis.clone())))
                     } else {
-                        Either::Right(syncer.get(Some(parent.0), parent.1).await)
+                        Either::Right(marshal.subscribe(Some(parent.0), parent.1).await)
                     };
 
                     // Wait for the parent block to be available or the request to be cancelled in a separate task (to
@@ -111,7 +83,7 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
                     self.context.with_label("propose").spawn({
                         let built = built.clone();
                         move |context| async move {
-                            let response_closed = oneshot_closed_future(&mut response);
+                            let response_closed = OneshotClosedFut::new(&mut response);
                             select! {
                                 parent = parent_request => {
                                     // Get the parent block
@@ -155,7 +127,7 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
                         height = built.1.height,
                         "broadcast requested"
                     );
-                    syncer.broadcast(built.1.clone()).await;
+                    marshal.broadcast(built.1.clone()).await;
                 }
                 Message::Verify {
                     view,
@@ -167,17 +139,17 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
                     let parent_request = if parent.1 == genesis_digest {
                         Either::Left(future::ready(Ok(genesis.clone())))
                     } else {
-                        Either::Right(syncer.get(Some(parent.0), parent.1).await)
+                        Either::Right(marshal.subscribe(Some(parent.0), parent.1).await)
                     };
 
                     // Wait for the blocks to be available or the request to be cancelled in a separate task (to
                     // continue processing other messages)
                     self.context.with_label("verify").spawn({
-                        let mut syncer = syncer.clone();
+                        let mut marshal = marshal.clone();
                         move |context| async move {
                             let requester =
-                                try_join(parent_request, syncer.get(None, payload).await);
-                            let response_closed = oneshot_closed_future(&mut response);
+                                try_join(parent_request, marshal.subscribe(None, payload).await);
+                            let response_closed = OneshotClosedFut::new(&mut response);
                             select! {
                                 result = requester => {
                                     // Unwrap the results
@@ -203,7 +175,7 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
                                     }
 
                                     // Persist the verified block
-                                    syncer.verified(view, block).await;
+                                    marshal.verified(view, block).await;
 
                                     // Send the verification result to the consensus
                                     let _ = response.send(true);
@@ -215,6 +187,16 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
                             }
                         }
                     });
+                }
+                Message::Finalized { block } => {
+                    // In an application that maintains state, you would compute the state transition function here.
+                    //
+                    // After an unclean shutdown, it is possible that the application may be asked to process a block it has already seen (which it can simply ignore).
+                    info!(
+                        height = block.height,
+                        digest = ?block.commitment(),
+                        "processed block"
+                    );
                 }
             }
         }

@@ -1,6 +1,7 @@
+use alto_types::Block;
 use commonware_consensus::{
     threshold_simplex::types::{Context, View},
-    Automaton, Relay,
+    Automaton, Relay, Reporter,
 };
 use commonware_cryptography::sha256::Digest;
 use futures::{
@@ -8,6 +9,7 @@ use futures::{
     SinkExt,
 };
 
+/// Messages sent to the application.
 pub enum Message {
     Genesis {
         response: oneshot::Sender<Digest>,
@@ -25,6 +27,9 @@ pub enum Message {
         parent: (View, Digest),
         payload: Digest,
         response: oneshot::Sender<bool>,
+    },
+    Finalized {
+        block: Block,
     },
 }
 
@@ -97,5 +102,16 @@ impl Relay for Mailbox {
             .send(Message::Broadcast { payload: digest })
             .await
             .expect("Failed to send broadcast");
+    }
+}
+
+impl Reporter for Mailbox {
+    type Activity = Block;
+
+    async fn report(&mut self, block: Self::Activity) {
+        self.sender
+            .send(Message::Finalized { block })
+            .await
+            .expect("Failed to send finalized");
     }
 }
