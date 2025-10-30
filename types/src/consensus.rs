@@ -1,23 +1,22 @@
-use commonware_consensus::threshold_simplex::types::{
+use commonware_consensus::simplex::signing_scheme::bls12381_threshold;
+use commonware_consensus::simplex::types::{
     Activity as CActivity, Finalization as CFinalization, Notarization as CNotarization,
-    Seed as CSeed,
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinSig, Variant},
+    ed25519,
     sha256::Digest,
 };
-use commonware_utils::modulo;
 
-pub type Seed = CSeed<MinSig>;
-pub type Notarization = CNotarization<MinSig, Digest>;
-pub type Finalization = CFinalization<MinSig, Digest>;
-pub type Activity = CActivity<MinSig, Digest>;
+pub use commonware_consensus::simplex::signing_scheme::bls12381_threshold::Seedable;
 
+pub type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
+pub type Seed = bls12381_threshold::Seed<MinSig>;
+pub type Notarization = CNotarization<Scheme, Digest>;
+pub type Finalization = CFinalization<Scheme, Digest>;
+pub type Activity = CActivity<Scheme, Digest>;
+
+pub type PublicKey = ed25519::PublicKey;
 pub type Identity = <MinSig as Variant>::Public;
 pub type Evaluation = Identity;
 pub type Signature = <MinSig as Variant>::Signature;
-
-/// The leader for a given seed is determined by the modulo of the seed with the number of participants.
-pub fn leader_index(seed: &[u8], participants: usize) -> usize {
-    modulo(seed, participants as u64) as usize
-}

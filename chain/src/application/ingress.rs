@@ -1,6 +1,7 @@
-use alto_types::Block;
+use alto_types::{Block, PublicKey};
 use commonware_consensus::{
-    threshold_simplex::types::{Context, View},
+    simplex::types::Context,
+    types::{Epoch, Round, View},
     Automaton, Relay, Reporter,
 };
 use commonware_cryptography::sha256::Digest;
@@ -15,7 +16,7 @@ pub enum Message {
         response: oneshot::Sender<Digest>,
     },
     Propose {
-        view: View,
+        round: Round,
         parent: (View, Digest),
         response: oneshot::Sender<Digest>,
     },
@@ -23,7 +24,7 @@ pub enum Message {
         payload: Digest,
     },
     Verify {
-        view: View,
+        round: Round,
         parent: (View, Digest),
         payload: Digest,
         response: oneshot::Sender<bool>,
@@ -47,9 +48,9 @@ impl Mailbox {
 
 impl Automaton for Mailbox {
     type Digest = Digest;
-    type Context = Context<Self::Digest>;
+    type Context = Context<Self::Digest, PublicKey>;
 
-    async fn genesis(&mut self) -> Self::Digest {
+    async fn genesis(&mut self, _epoch: Epoch) -> Self::Digest {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(Message::Genesis { response })
@@ -58,13 +59,16 @@ impl Automaton for Mailbox {
         receiver.await.expect("Failed to receive genesis")
     }
 
-    async fn propose(&mut self, context: Context<Self::Digest>) -> oneshot::Receiver<Self::Digest> {
+    async fn propose(
+        &mut self,
+        context: Context<Self::Digest, PublicKey>,
+    ) -> oneshot::Receiver<Self::Digest> {
         // If we linked payloads to their parent, we would include
         // the parent in the `Context` in the payload.
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(Message::Propose {
-                view: context.view,
+                round: context.round,
                 parent: context.parent,
                 response,
             })
@@ -75,7 +79,7 @@ impl Automaton for Mailbox {
 
     async fn verify(
         &mut self,
-        context: Context<Self::Digest>,
+        context: Context<Self::Digest, PublicKey>,
         payload: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         // If we linked payloads to their parent, we would verify
@@ -83,7 +87,7 @@ impl Automaton for Mailbox {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(Message::Verify {
-                view: context.view,
+                round: context.round,
                 parent: context.parent,
                 payload,
                 response,

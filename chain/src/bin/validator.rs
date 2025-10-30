@@ -1,17 +1,18 @@
-use alto_chain::{engine, Config, Peers};
+use alto_chain::{engine, Config, Peers, StaticCoordinator};
 use alto_client::Client;
-use alto_types::NAMESPACE;
+use alto_types::{EPOCH, NAMESPACE};
 use clap::{Arg, Command};
 use commonware_codec::{Decode, DecodeExt};
+use commonware_consensus::marshal;
 use commonware_cryptography::{
     bls12381::primitives::{group, poly, variant::MinSig},
     ed25519::{PrivateKey, PublicKey},
     Signer,
 };
 use commonware_deployer::ec2::Hosts;
-use commonware_p2p::authenticated::discovery as authenticated;
+use commonware_p2p::{authenticated::discovery as authenticated, utils::requester};
 use commonware_runtime::{tokio, Metrics, Runner};
-use commonware_utils::{from_hex_formatted, quorum, union_unique};
+use commonware_utils::{from_hex_formatted, quorum, set::Ordered, union_unique};
 use futures::future::try_join_all;
 use governor::Quota;
 use std::{
@@ -24,11 +25,11 @@ use std::{
 };
 use tracing::{error, info, Level};
 
-const PENDING_CHANNEL: u32 = 0;
-const RECOVERED_CHANNEL: u32 = 1;
-const RESOLVER_CHANNEL: u32 = 2;
-const BROADCASTER_CHANNEL: u32 = 3;
-const BACKFILL_BY_DIGEST_CHANNEL: u32 = 4;
+const PENDING_CHANNEL: u64 = 0;
+const RECOVERED_CHANNEL: u64 = 1;
+const RESOLVER_CHANNEL: u64 = 2;
+const BROADCASTER_CHANNEL: u64 = 3;
+const MARSHAL_CHANNEL: u64 = 4;
 
 const LEADER_TIMEOUT: Duration = Duration::from_secs(1);
 const NOTARIZATION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -175,14 +176,25 @@ fn main() {
 
         // Configure network
         let p2p_namespace = union_unique(NAMESPACE, b"_P2P");
-        let mut p2p_cfg = authenticated::Config::aggressive(
-            signer.clone(),
-            &p2p_namespace,
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
-            SocketAddr::new(ip, config.port),
-            bootstrappers,
-            MAX_MESSAGE_SIZE,
-        );
+        let mut p2p_cfg = if config.local {
+            authenticated::Config::local(
+                signer.clone(),
+                &p2p_namespace,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
+                SocketAddr::new(ip, config.port),
+                bootstrappers,
+                MAX_MESSAGE_SIZE,
+            )
+        } else {
+            authenticated::Config::recommended(
+                signer.clone(),
+                &p2p_namespace,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
+                SocketAddr::new(ip, config.port),
+                bootstrappers,
+                MAX_MESSAGE_SIZE,
+            )
+        };
         p2p_cfg.mailbox_size = config.mailbox_size;
 
         // Start p2p
@@ -190,7 +202,8 @@ fn main() {
             authenticated::Network::new(context.with_label("network"), p2p_cfg);
 
         // Provide authorized peers
-        oracle.register(0, peers.clone()).await;
+        let participants: Ordered<PublicKey> = peers.clone().into();
+        oracle.register(EPOCH, participants.clone()).await;
 
         // Register pending channel
         let pending_limit = Quota::per_second(NonZeroU32::new(128).unwrap());
@@ -213,13 +226,9 @@ fn main() {
             config.message_backlog,
         );
 
-        // Register backfill channel
-        let backfill_quota = Quota::per_second(NonZeroU32::new(8).unwrap());
-        let backfill = network.register(
-            BACKFILL_BY_DIGEST_CHANNEL,
-            backfill_quota,
-            config.message_backlog,
-        );
+        // Register marshal channel
+        let marshal_quota = Quota::per_second(NonZeroU32::new(8).unwrap());
+        let marshal = network.register(MARSHAL_CHANNEL, marshal_quota, config.message_backlog);
 
         // Create network
         let p2p = network.start();
@@ -231,18 +240,17 @@ fn main() {
         }
 
         // Create engine
-        let config = engine::Config {
+        let engine_cfg = engine::Config {
             blocker: oracle,
             partition_prefix: "engine".to_string(),
             blocks_freezer_table_initial_size: BLOCKS_FREEZER_TABLE_INITIAL_SIZE,
             finalized_freezer_table_initial_size: FINALIZED_FREEZER_TABLE_INITIAL_SIZE,
-            signer,
+            me: public_key.clone(),
             polynomial,
             share,
-            participants: peers,
+            participants: peers.clone().into(),
             mailbox_size: config.mailbox_size,
             deque_size: config.deque_size,
-            backfill_quota,
             leader_timeout: LEADER_TIMEOUT,
             notarization_timeout: NOTARIZATION_TIMEOUT,
             nullify_retry: NULLIFY_RETRY,
@@ -255,10 +263,27 @@ fn main() {
             fetch_rate_per_peer: resolver_limit,
             indexer,
         };
-        let engine = engine::Engine::new(context.with_label("engine"), config).await;
+        let engine = engine::Engine::new(context.with_label("engine"), engine_cfg).await;
+
+        let marshal_resolver_cfg = marshal::resolver::p2p::Config {
+            public_key: public_key.clone(),
+            coordinator: StaticCoordinator::from(peers),
+            mailbox_size: config.mailbox_size,
+            requester_config: requester::Config {
+                me: Some(public_key),
+                rate_limit: Quota::per_second(NonZeroU32::new(5).unwrap()),
+                initial: Duration::from_secs(1),
+                timeout: Duration::from_secs(2),
+            },
+            fetch_retry_timeout: Duration::from_millis(100),
+            priority_requests: false,
+            priority_responses: false,
+        };
+        let marshal_resolver =
+            marshal::resolver::p2p::init(&context, marshal_resolver_cfg, marshal);
 
         // Start engine
-        let engine = engine.start(pending, recovered, resolver, broadcaster, backfill);
+        let engine = engine.start(pending, recovered, resolver, broadcaster, marshal_resolver);
 
         // Wait for any task to error
         if let Err(e) = try_join_all(vec![p2p, engine]).await {
