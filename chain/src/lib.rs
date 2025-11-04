@@ -1,7 +1,5 @@
 use alto_types::Scheme;
 use commonware_consensus::marshal::SchemeProvider;
-use commonware_cryptography::ed25519;
-use commonware_resolver::p2p;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
@@ -60,30 +58,6 @@ impl From<Scheme> for StaticSchemeProvider {
     }
 }
 
-/// A static coordinator that always returns the same set of peers.
-#[derive(Clone)]
-pub struct StaticCoordinator {
-    participants: Vec<ed25519::PublicKey>,
-}
-
-impl p2p::Coordinator for StaticCoordinator {
-    type PublicKey = ed25519::PublicKey;
-
-    fn peers(&self) -> &[Self::PublicKey] {
-        &self.participants
-    }
-
-    fn peer_set_id(&self) -> u64 {
-        0
-    }
-}
-
-impl From<Vec<ed25519::PublicKey>> for StaticCoordinator {
-    fn from(participants: Vec<ed25519::PublicKey>) -> Self {
-        Self { participants }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,6 +74,7 @@ mod tests {
     use commonware_p2p::{
         simulated::{self, Link, Network, Oracle, Receiver, Sender},
         utils::requester,
+        Manager,
     };
     use commonware_runtime::{
         deterministic::{self, Runner},
@@ -135,18 +110,15 @@ mod tests {
             (Sender<PublicKey>, Receiver<PublicKey>),
         ),
     > {
+        oracle.update(0, validators.into()).await;
         let mut registrations = HashMap::new();
         for validator in validators.iter() {
-            let (pending_sender, pending_receiver) =
-                oracle.register(validator.clone(), 0).await.unwrap();
-            let (recovered_sender, recovered_receiver) =
-                oracle.register(validator.clone(), 1).await.unwrap();
-            let (resolver_sender, resolver_receiver) =
-                oracle.register(validator.clone(), 2).await.unwrap();
-            let (broadcast_sender, broadcast_receiver) =
-                oracle.register(validator.clone(), 3).await.unwrap();
-            let (backfill_sender, backfill_receiver) =
-                oracle.register(validator.clone(), 4).await.unwrap();
+            let mut oracle = oracle.control(validator.clone());
+            let (pending_sender, pending_receiver) = oracle.register(0).await.unwrap();
+            let (recovered_sender, recovered_receiver) = oracle.register(1).await.unwrap();
+            let (resolver_sender, resolver_receiver) = oracle.register(2).await.unwrap();
+            let (broadcast_sender, broadcast_receiver) = oracle.register(3).await.unwrap();
+            let (backfill_sender, backfill_receiver) = oracle.register(4).await.unwrap();
             registrations.insert(
                 validator.clone(),
                 (
@@ -207,6 +179,7 @@ mod tests {
                 simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
+                    tracked_peer_sets: Some(1),
                 },
             );
 
@@ -274,7 +247,7 @@ mod tests {
                 // Configure marshal resolver
                 let marshal_resolver_cfg = marshal::resolver::p2p::Config {
                     public_key: public_key.clone(),
-                    coordinator: StaticCoordinator::from(validators.clone()),
+                    manager: oracle.clone(),
                     mailbox_size: 1024,
                     requester_config: requester::Config {
                         me: Some(public_key.clone()),
@@ -388,6 +361,7 @@ mod tests {
                 simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
+                    tracked_peer_sets: Some(1),
                 },
             );
 
@@ -467,7 +441,7 @@ mod tests {
                 // Configure marshal resolver
                 let marshal_resolver_cfg = marshal::resolver::p2p::Config {
                     public_key: public_key.clone(),
-                    coordinator: StaticCoordinator::from(validators.clone()),
+                    manager: oracle.clone(),
                     mailbox_size: 1024,
                     requester_config: requester::Config {
                         me: Some(public_key.clone()),
@@ -573,7 +547,7 @@ mod tests {
             // Configure marshal resolver
             let marshal_resolver_cfg = marshal::resolver::p2p::Config {
                 public_key: public_key.clone(),
-                coordinator: StaticCoordinator::from(validators.clone()),
+                manager: oracle,
                 mailbox_size: 1024,
                 requester_config: requester::Config {
                     me: Some(public_key.clone()),
@@ -659,6 +633,7 @@ mod tests {
                     simulated::Config {
                         max_size: 1024 * 1024,
                         disconnect_on_block: true,
+                        tracked_peer_sets: Some(1),
                     },
                 );
 
@@ -727,7 +702,7 @@ mod tests {
                     // Configure marshal resolver
                     let marshal_resolver_cfg = marshal::resolver::p2p::Config {
                         public_key: public_key.clone(),
-                        coordinator: StaticCoordinator::from(validators.clone()),
+                        manager: oracle.clone(),
                         mailbox_size: 1024,
                         requester_config: requester::Config {
                             me: Some(public_key.clone()),
@@ -843,6 +818,7 @@ mod tests {
                 simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
+                    tracked_peer_sets: Some(1),
                 },
             );
 
@@ -919,7 +895,7 @@ mod tests {
                 // Configure marshal resolver
                 let marshal_resolver_cfg = marshal::resolver::p2p::Config {
                     public_key: public_key.clone(),
-                    coordinator: StaticCoordinator::from(validators.clone()),
+                    manager: oracle.clone(),
                     mailbox_size: 1024,
                     requester_config: requester::Config {
                         me: Some(public_key.clone()),
