@@ -1,13 +1,18 @@
 //! Common types used throughout `alto`.
 
+use commonware_consensus::types::Epoch;
+use commonware_utils::{hex, NZU64};
+use std::num::NonZero;
+
 mod block;
 pub use block::{Block, Finalized, Notarized};
+
 mod consensus;
-use commonware_utils::hex;
 pub use consensus::{
     Activity, Evaluation, Finalization, Identity, Notarization, PublicKey, Scheme, Seed, Seedable,
     Signature,
 };
+
 pub mod wasm;
 
 /// The unique namespace prefix used in all signing operations to prevent signature replay attacks.
@@ -18,14 +23,15 @@ pub const NAMESPACE: &[u8] = b"_ALTO";
 /// Because alto does not implement reconfiguration (validator set changes and resharing), we hardcode the epoch to 0.
 ///
 /// For an example of how to implement reconfiguration and resharing, see [commonware-reshare](https://github.com/commonwarexyz/monorepo/tree/main/examples/reshare).
-pub const EPOCH: u64 = 0;
+pub const EPOCH: Epoch = Epoch::zero();
+
 /// The epoch length used in [commonware_consensus::simplex].
 ///
 /// Because alto does not implement reconfiguration (validator set changes and resharing), we hardcode the epoch length to u64::MAX (to
 /// stay in the first epoch forever).
 ///
 /// For an example of how to implement reconfiguration and resharing, see [commonware-reshare](https://github.com/commonwarexyz/monorepo/tree/main/examples/reshare).
-pub const EPOCH_LENGTH: u64 = u64::MAX;
+pub const EPOCH_LENGTH: NonZero<u64> = NZU64!(u64::MAX);
 
 #[repr(u8)]
 pub enum Kind {
@@ -58,14 +64,16 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_consensus::{
-        simplex::types::{Finalization, Finalize, Notarization, Notarize, Proposal},
-        types::Round,
+        simplex::{
+            scheme::bls12381_threshold,
+            types::{Finalization, Finalize, Notarization, Notarize, Proposal},
+        },
+        types::{Round, View},
     };
     use commonware_cryptography::{
-        bls12381::{dkg::ops, primitives::variant::MinSig},
-        ed25519, Digestible, Hasher, PrivateKeyExt, Sha256, Signer,
+        bls12381::primitives::variant::MinSig, certificate::mocks::Fixture, Digestible, Hasher,
+        Sha256,
     };
-    use commonware_utils::set::Ordered;
     use rand::{rngs::StdRng, SeedableRng};
 
     #[test]
@@ -73,19 +81,16 @@ mod tests {
         // Create network key
         let mut rng = StdRng::seed_from_u64(0);
         let n = 4;
-        let participants = (0..n)
-            .map(|_| ed25519::PrivateKey::from_rng(&mut rng).public_key())
-            .collect::<Ordered<_>>();
-        let (polynomial, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, 3);
-        let schemes: Vec<_> = shares
-            .into_iter()
-            .map(|share| Scheme::new(participants.clone(), &polynomial, share))
-            .collect();
+        let Fixture { schemes, .. } = bls12381_threshold::fixture::<MinSig, _>(&mut rng, n);
 
         // Create a block
         let digest = Sha256::hash(b"hello world");
         let block = Block::new(digest, 10, 100);
-        let proposal = Proposal::new(Round::new(EPOCH, 11), 8, block.digest());
+        let proposal = Proposal::new(
+            Round::new(EPOCH, View::new(9)),
+            View::new(8),
+            block.digest(),
+        );
 
         // Create a notarization
         let notarizes: Vec<_> = schemes
@@ -109,19 +114,16 @@ mod tests {
         // Create network key
         let mut rng = StdRng::seed_from_u64(0);
         let n = 4;
-        let (polynomial, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, 3);
-        let participants = (0..n)
-            .map(|_| ed25519::PrivateKey::from_rng(&mut rng).public_key())
-            .collect::<Ordered<_>>();
-        let schemes: Vec<_> = shares
-            .into_iter()
-            .map(|share| Scheme::new(participants.clone(), &polynomial, share))
-            .collect();
+        let Fixture { schemes, .. } = bls12381_threshold::fixture::<MinSig, _>(&mut rng, n);
 
         // Create a block
         let digest = Sha256::hash(b"hello world");
         let block = Block::new(digest, 10, 100);
-        let proposal = Proposal::new(Round::new(EPOCH, 11), 8, block.digest());
+        let proposal = Proposal::new(
+            Round::new(EPOCH, View::new(9)),
+            View::new(8),
+            block.digest(),
+        );
 
         // Create a finalization
         let finalizes: Vec<_> = schemes
