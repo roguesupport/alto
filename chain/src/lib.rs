@@ -27,6 +27,8 @@ pub struct Config {
     pub mailbox_size: usize,
     pub deque_size: usize,
 
+    pub signature_threads: usize,
+
     pub indexer: Option<String>,
 }
 
@@ -41,6 +43,7 @@ pub struct Peers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alto_types::NAMESPACE;
     use commonware_consensus::{marshal, simplex::scheme::bls12381_threshold, types::ViewDelta};
     use commonware_cryptography::{
         bls12381::primitives::variant::MinSig, certificate::mocks::Fixture, ed25519::PublicKey,
@@ -51,6 +54,7 @@ mod tests {
         simulated::{self, Link, Network, Oracle, Receiver, Sender},
         Manager,
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic::{self, Runner},
         Clock, Metrics, Runner as _, Spawner,
@@ -58,7 +62,7 @@ mod tests {
     use commonware_utils::{ordered::Set, NZU32};
     use engine::{Config, Engine};
     use governor::Quota;
-    use indexer::{Indexer, Mock};
+    use indexer::Mock;
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::{
         collections::{HashMap, HashSet},
@@ -109,7 +113,7 @@ mod tests {
             .await;
         let mut registrations = HashMap::new();
         for validator in validators.iter() {
-            let mut oracle = oracle.control(validator.clone());
+            let oracle = oracle.control(validator.clone());
             let (pending_sender, pending_receiver) = oracle.register(0, TEST_QUOTA).await.unwrap();
             let (recovered_sender, recovered_receiver) =
                 oracle.register(1, TEST_QUOTA).await.unwrap();
@@ -191,7 +195,7 @@ mod tests {
                 private_keys,
                 participants,
                 ..
-            } = bls12381_threshold::fixture::<MinSig, _>(&mut context, n);
+            } = bls12381_threshold::fixture::<MinSig, _>(&mut context, NAMESPACE, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
             let participants_set = Set::from_iter_dedup(participants.clone());
 
@@ -207,7 +211,7 @@ mod tests {
 
                 // Configure engine
                 let uid = format!("validator_{public_key}");
-                let config: Config<_, Mock> = engine::Config {
+                let config: Config<_, Mock, _> = engine::Config {
                     blocker: oracle.control(public_key.clone()),
                     partition_prefix: uid.clone(),
                     blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
@@ -229,6 +233,7 @@ mod tests {
                     fetch_concurrent: 10,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
                     indexer: None,
+                    strategy: Sequential,
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -363,7 +368,7 @@ mod tests {
                 private_keys,
                 participants,
                 ..
-            } = bls12381_threshold::fixture::<MinSig, _>(&mut context, n);
+            } = bls12381_threshold::fixture::<MinSig, _>(&mut context, NAMESPACE, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
             let participants_set = Set::from_iter_dedup(participants.clone());
 
@@ -391,7 +396,7 @@ mod tests {
                 // Configure engine
                 let public_key = signer.public_key();
                 let uid = format!("validator_{public_key}");
-                let config: Config<_, Mock> = engine::Config {
+                let config: Config<_, Mock, _> = engine::Config {
                     blocker: oracle.control(public_key.clone()),
                     partition_prefix: uid.clone(),
                     blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
@@ -413,6 +418,7 @@ mod tests {
                     fetch_concurrent: 10,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
                     indexer: None,
+                    strategy: Sequential,
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -494,7 +500,7 @@ mod tests {
             let share = schemes[0].share().cloned().unwrap();
             let public_key = signer.public_key();
             let uid = format!("validator_{public_key}");
-            let config: Config<_, Mock> = engine::Config {
+            let config: Config<_, Mock, _> = engine::Config {
                 blocker: oracle.control(public_key.clone()),
                 partition_prefix: uid.clone(),
                 blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
@@ -516,6 +522,7 @@ mod tests {
                 fetch_concurrent: 10,
                 fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
                 indexer: None,
+                strategy: Sequential,
             };
             let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -592,7 +599,7 @@ mod tests {
 
         // Derive threshold
         let mut rng = StdRng::seed_from_u64(0);
-        let fixture = bls12381_threshold::fixture::<MinSig, _>(&mut rng, n);
+        let fixture = bls12381_threshold::fixture::<MinSig, _>(&mut rng, NAMESPACE, n);
 
         // Random restarts every x seconds
         let mut runs = 0;
@@ -640,7 +647,7 @@ mod tests {
 
                     // Configure engine
                     let uid = format!("validator_{public_key}");
-                    let config: Config<_, Mock> = engine::Config {
+                    let config: Config<_, Mock, _> = engine::Config {
                         blocker: oracle.control(public_key.clone()),
                         partition_prefix: uid.clone(),
                         blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
@@ -662,6 +669,7 @@ mod tests {
                         fetch_concurrent: 10,
                         fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
                         indexer: None,
+                        strategy: Sequential,
                     };
                     let engine = Engine::new(context.with_label(&uid), config).await;
 
@@ -797,7 +805,7 @@ mod tests {
                 private_keys,
                 participants,
                 ..
-            } = bls12381_threshold::fixture::<MinSig, _>(&mut context, n);
+            } = bls12381_threshold::fixture::<MinSig, _>(&mut context, NAMESPACE, n);
             let mut registrations = register_validators(&mut oracle, &participants).await;
             let participants_set = Set::from_iter_dedup(participants.clone());
 
@@ -824,7 +832,7 @@ mod tests {
 
                 // Configure engine
                 let uid = format!("validator_{public_key}");
-                let config: Config<_, Mock> = engine::Config {
+                let config: Config<_, Mock, _> = engine::Config {
                     blocker: oracle.control(public_key.clone()),
                     partition_prefix: uid.clone(),
                     blocks_freezer_table_initial_size: FREEZER_TABLE_INITIAL_SIZE,
@@ -846,6 +854,7 @@ mod tests {
                     fetch_concurrent: 10,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(10).unwrap()),
                     indexer: Some(indexer.clone()),
+                    strategy: Sequential,
                 };
                 let engine = Engine::new(context.with_label(&uid), config).await;
 

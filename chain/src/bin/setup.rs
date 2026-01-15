@@ -1,4 +1,5 @@
 use alto_chain::{Config, Peers};
+use alto_types::NAMESPACE;
 use clap::{value_parser, Arg, ArgMatches, Command};
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_consensus::simplex::scheme::bls12381_threshold;
@@ -74,6 +75,12 @@ fn main() {
                 .arg(
                     Arg::new("deque_size")
                         .long("deque-size")
+                        .required(true)
+                        .value_parser(value_parser!(usize)),
+                )
+                .arg(
+                    Arg::new("signature_threads")
+                        .long("signature-threads")
                         .required(true)
                         .value_parser(value_parser!(usize)),
                 )
@@ -182,6 +189,7 @@ fn main() {
             let message_backlog = *sub_matches.get_one::<usize>("message_backlog").unwrap();
             let mailbox_size = *sub_matches.get_one::<usize>("mailbox_size").unwrap();
             let deque_size = *sub_matches.get_one::<usize>("deque_size").unwrap();
+            let signature_threads = *sub_matches.get_one::<usize>("signature_threads").unwrap();
             let output = sub_matches.get_one::<String>("output").unwrap().clone();
             match sub_matches.subcommand() {
                 Some(("local", sub_matches)) => generate_local(
@@ -193,6 +201,7 @@ fn main() {
                     message_backlog,
                     mailbox_size,
                     deque_size,
+                    signature_threads,
                     output,
                 ),
                 Some(("remote", sub_matches)) => generate_remote(
@@ -204,6 +213,7 @@ fn main() {
                     message_backlog,
                     mailbox_size,
                     deque_size,
+                    signature_threads,
                     output,
                 ),
                 _ => {
@@ -244,6 +254,7 @@ fn generate_local(
     message_backlog: usize,
     mailbox_size: usize,
     deque_size: usize,
+    signature_threads: usize,
     output: String,
 ) {
     // Extract arguments
@@ -284,7 +295,8 @@ fn generate_local(
 
     // Generate consensus key
     let peers_u32 = peers as u32;
-    let Fixture { schemes, .. } = bls12381_threshold::fixture::<MinSig, _>(&mut OsRng, peers_u32);
+    let Fixture { schemes, .. } =
+        bls12381_threshold::fixture::<MinSig, _>(&mut OsRng, NAMESPACE, peers_u32);
 
     let identity = schemes[0].polynomial().public();
     info!(%identity, "generated network key");
@@ -303,7 +315,7 @@ fn generate_local(
         let peer_config_file = format!("{name}.yaml");
         let directory = format!("{storage_output}/{name}");
         let peer_config = Config {
-            private_key: signer.to_string(),
+            private_key: hex(&signer.encode()),
             share: hex(&scheme.share().unwrap().encode()),
             polynomial: hex(&scheme.polynomial().encode()),
 
@@ -320,6 +332,8 @@ fn generate_local(
             message_backlog,
             mailbox_size,
             deque_size,
+
+            signature_threads,
 
             indexer: None,
         };
@@ -387,6 +401,7 @@ fn generate_remote(
     message_backlog: usize,
     mailbox_size: usize,
     deque_size: usize,
+    signature_threads: usize,
     output: String,
 ) {
     // Extract arguments
@@ -454,7 +469,8 @@ fn generate_remote(
 
     // Generate consensus key
     let peers_u32 = peers as u32;
-    let Fixture { schemes, .. } = bls12381_threshold::fixture::<MinSig, _>(&mut OsRng, peers_u32);
+    let Fixture { schemes, .. } =
+        bls12381_threshold::fixture::<MinSig, _>(&mut OsRng, NAMESPACE, peers_u32);
 
     let identity = schemes[0].polynomial().public();
     info!(%identity, "generated network key");
@@ -471,7 +487,7 @@ fn generate_remote(
         let name = signer.public_key().to_string();
         let peer_config_file = format!("{name}.yaml");
         let peer_config = Config {
-            private_key: signer.to_string(),
+            private_key: hex(&signer.encode()),
             share: hex(&scheme.share().unwrap().encode()),
             polynomial: hex(&scheme.polynomial().encode()),
 
@@ -488,6 +504,8 @@ fn generate_remote(
             message_backlog,
             mailbox_size,
             deque_size,
+
+            signature_threads,
 
             indexer: None,
         };

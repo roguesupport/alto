@@ -16,19 +16,20 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 alto-client = { version = "0.0.17", path = "client" }
 alto-types = { version = "0.0.17", path = "types" }
-commonware-broadcast = "0.0.64"
-commonware-codec = "0.0.64"
-commonware-consensus = "0.0.64"
-commonware-cryptography = "0.0.64"
-commonware-deployer = { version = "0.0.64", default-features = false }
-commonware-macros = "0.0.64"
-commonware-p2p = "0.0.64"
-commonware-resolver = "0.0.64"
-commonware-runtime = "0.0.64"
-commonware-storage = "0.0.64"
-commonware-stream = "0.0.64"
-commonware-utils = "0.0.64"
-commonware-math = "0.0.64"
+commonware-broadcast = "0.0.65"
+commonware-codec = "0.0.65"
+commonware-consensus = "0.0.65"
+commonware-cryptography = "0.0.65"
+commonware-deployer = { version = "0.0.65", default-features = false }
+commonware-macros = "0.0.65"
+commonware-p2p = "0.0.65"
+commonware-resolver = "0.0.65"
+commonware-runtime = "0.0.65"
+commonware-storage = "0.0.65"
+commonware-stream = "0.0.65"
+commonware-utils = "0.0.65"
+commonware-math = "0.0.65"
+commonware-parallel = "0.0.65"
 thiserror = "2.0.12"
 bytes = "1.7.1"
 rand = "0.8.5"
@@ -61,6 +62,10 @@ overflow-checks = true
 # To guard against unexpected behavior in production, we enable overflow checks in
 # "release" although they incur some performance penalty.
 overflow-checks = true
+# Use a single codegen unit for better optimization (slower compile, faster runtime)
+codegen-units = 1
+# Enable link-time optimization across all crates
+lto = true
 
 [profile.test]
 # Although overflow checks are enabled by default in "test", we explicitly

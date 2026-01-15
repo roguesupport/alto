@@ -1,7 +1,8 @@
 use alto_indexer::{Api, Indexer};
-use alto_types::{Identity, Scheme};
+use alto_types::{Identity, Scheme, NAMESPACE};
 use clap::Parser;
 use commonware_codec::DecodeExt;
+use commonware_parallel::Sequential;
 use std::sync::Arc;
 use tracing::info;
 
@@ -34,8 +35,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Identity::decode(&mut bytes.as_slice()).map_err(|_| "Failed to decode identity")?;
 
     // Initialize indexer
-    let certificate_verifier = Scheme::certificate_verifier(identity);
-    let indexer = Arc::new(Indexer::new(certificate_verifier));
+    let certificate_verifier = Scheme::certificate_verifier(NAMESPACE, identity);
+    let indexer = Arc::new(Indexer::new(certificate_verifier, Sequential));
     let api = Api::new(indexer);
     let app = api.router();
 
